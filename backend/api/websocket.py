@@ -124,27 +124,37 @@ class ConnectionManager:
         """发送 AI 分析的新消息
 
         同时发布 message.received 事件。
+        注意：过滤掉发送人是"我"的消息，不广播自己发送的内容。
         """
+        # 过滤掉自己发送的消息（AI 返回 $self 表示自己）
+        filtered_messages = [
+            msg for msg in new_messages
+            if msg.get("sender") != "$self"
+        ]
+
+        # 如果过滤后没有消息，直接返回
+        if not filtered_messages:
+            return
+
         # 兼容旧协议
         message = {
             "type": "ai_message",
             "timestamp": datetime.now().isoformat(),
             "contact": contact,
-            "new_messages": new_messages,
+            "new_messages": filtered_messages,
             "summary": summary,
-            "message_count": len(new_messages),
+            "message_count": len(filtered_messages),
             "processing_stats": processing_stats or {},
         }
         await self.broadcast(message)
 
         # 发布新事件
-        if new_messages:
-            event = Event.message_received(
-                contact=contact,
-                messages=new_messages,
-                screenshot_url=None,  # 可以从 processing_stats 获取
-            )
-            await self._event_bus.emit(event)
+        event = Event.message_received(
+            contact=contact,
+            messages=filtered_messages,
+            screenshot_url=None,  # 可以从 processing_stats 获取
+        )
+        await self._event_bus.emit(event)
 
     async def send_ai_result(self, result: ProcessingResult) -> None:
         """发送 AI 处理结果
