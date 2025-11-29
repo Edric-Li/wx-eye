@@ -613,6 +613,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         if contact_monitor.last_window:
                             sender = get_sender()
                             result = await sender.send(text, contact, contact_monitor.last_window)
+                            # 记录已发送的消息，避免被当作新消息广播
+                            if result.success and engine.ai_processor:
+                                engine.ai_processor.add_sent_message(contact, text)
                             # 发布消息发送事件
                             await manager.emit_message_sent(
                                 contact=contact,
@@ -811,6 +814,10 @@ async def send_message(text: str, contact: str) -> dict[str, Any]:
 
     sender = get_sender()
     result = await sender.send(text, contact, contact_monitor.last_window)
+
+    # 记录已发送的消息，避免被当作新消息广播
+    if result.success and engine.ai_processor:
+        engine.ai_processor.add_sent_message(contact, text)
 
     # 发布消息发送事件
     await manager.emit_message_sent(

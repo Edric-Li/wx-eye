@@ -95,6 +95,11 @@ class AIMessageProcessor:
         # 本地去重：每个联系人的历史消息
         self._message_history: dict[str, list[tuple[str, str]]] = {}
 
+        # 已发送消息缓存：用于过滤用户自己发送的消息，避免广播
+        # 格式: {contact: [(content, timestamp), ...]}
+        self._sent_messages: dict[str, list[tuple[str, float]]] = {}
+        self._sent_message_ttl: float = 30.0  # 30秒内的发送消息会被过滤
+
         logger.info(
             f"AI 处理器初始化: enable_ai={enable_ai}, "
             f"model={model if enable_ai else 'N/A'}"
@@ -103,6 +108,52 @@ class AIMessageProcessor:
     def set_callback(self, callback: Callable[[ProcessingResult], Any]) -> None:
         """设置结果回调函数"""
         self._on_result = callback
+
+    def add_sent_message(self, contact: str, text: str) -> None:
+        """记录用户发送的消息，用于后续过滤
+
+        发送消息后调用此方法，在 AI 识别新消息时会过滤掉这些已发送的消息，
+        避免将用户自己发送的消息作为 message.received 事件广播。
+
+        Args:
+            contact: 联系人名称
+            text: 发送的消息内容
+        """
+        if contact not in self._sent_messages:
+            self._sent_messages[contact] = []
+
+        self._sent_messages[contact].append((text.strip(), time.time()))
+        preview = text[:50] + "..." if len(text) > 50 else text
+        logger.debug(f"[{contact}] 记录已发送消息: {preview}")
+
+    def _clean_expired_sent_messages(self, contact: str) -> None:
+        """清理过期的已发送消息记录"""
+        if contact not in self._sent_messages:
+            return
+
+        now = time.time()
+        self._sent_messages[contact] = [
+            (text, ts) for text, ts in self._sent_messages[contact]
+            if now - ts < self._sent_message_ttl
+        ]
+
+    def _is_sent_by_user(self, contact: str, content: str) -> bool:
+        """检查消息是否是用户发送的
+
+        使用规范化比较，去除首尾空白并压缩连续空白，
+        提高 AI 识别结果与原始发送消息的匹配率。
+        """
+        if contact not in self._sent_messages:
+            return False
+
+        # 规范化：去除首尾空白，压缩连续空白
+        content_normalized = " ".join(content.split())
+
+        for sent_text, _ in self._sent_messages[contact]:
+            sent_normalized = " ".join(sent_text.split())
+            if sent_normalized == content_normalized:
+                return True
+        return False
 
     async def start(self) -> None:
         """启动处理队列"""
@@ -245,6 +296,18 @@ class AIMessageProcessor:
         dedup_time = int((time.time() - dedup_start) * 1000)
         logger.info(f"[{contact}] [Step 2/2] 本地去重完成: {dedup_time}ms, 原始消息={len(current_messages)}条, 新消息={len(new_messages)}条")
 
+        # Step 3: 过滤掉用户自己发送的消息
+        self._clean_expired_sent_messages(contact)
+        if new_messages:
+            before_filter = len(new_messages)
+            new_messages = [
+                (sender, content) for sender, content in new_messages
+                if not self._is_sent_by_user(contact, content)
+            ]
+            filtered_count = before_filter - len(new_messages)
+            if filtered_count > 0:
+                logger.info(f"[{contact}] 过滤掉 {filtered_count} 条用户发送的消息")
+
         if not new_messages:
             result.stage = "dedup_filtered"
             self.stats.dedup_filtered += 1
@@ -350,12 +413,16 @@ class AIMessageProcessor:
         """
         self.dedup.reset(contact)
 
-        # 重置消息历史
+        # 重置消息历史和已发送消息缓存
         if contact is None:
             self._message_history.clear()
+            self._sent_messages.clear()
             self.stats = ProcessingStats()
-        elif contact in self._message_history:
-            del self._message_history[contact]
+        else:
+            if contact in self._message_history:
+                del self._message_history[contact]
+            if contact in self._sent_messages:
+                del self._sent_messages[contact]
 
         logger.info(f"已重置处理状态: {contact or '全部'}")
 
