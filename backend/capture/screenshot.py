@@ -1,13 +1,14 @@
 """
 截图服务模块
 macOS: 使用 CGWindowListCreateImage 直接截取窗口内容
-Windows: 使用 mss 截取屏幕区域
+Windows: 使用 PrintWindow API 截取窗口内容（支持被遮挡/最小化的窗口）
 """
 
 from __future__ import annotations
 
 import logging
 import sys
+import time
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -84,6 +85,8 @@ class ScreenshotService:
         """
         if self.platform == "darwin":
             img = self._capture_window_macos(window)
+        elif self.platform == "win32":
+            img = self._capture_window_windows(window)
         else:
             img = self.capture_region(window.x, window.y, window.width, window.height)
 
@@ -151,6 +154,96 @@ class ScreenshotService:
         except Exception as e:
             logger.error(f"macOS capture failed: {e}")
             return self.capture_region(window.x, window.y, window.width, window.height)
+
+    def _capture_window_windows(self, window: WindowInfo) -> Image.Image:
+        """Windows: 使用 PrintWindow API 截取窗口内容（即使最小化/被遮挡）"""
+        try:
+            import win32con
+            import win32gui
+            import win32ui
+        except ImportError as e:
+            logger.error(f"Missing Windows module (pywin32): {e}")
+            return self.capture_region(window.x, window.y, window.width, window.height)
+
+        hwnd = window.window_id
+        if hwnd is None:
+            logger.warning(
+                f"Window handle not found for {window.title}, falling back to region capture"
+            )
+            return self.capture_region(window.x, window.y, window.width, window.height)
+
+        # 如果窗口最小化，需要先恢复它（PrintWindow 对最小化窗口可能返回空白）
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_SHOWNOACTIVATE)
+            time.sleep(0.1)  # 等待窗口渲染完成
+
+        # 获取窗口尺寸（包括边框）
+        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+        width = right - left
+        height = bottom - top
+
+        if width <= 0 or height <= 0:
+            logger.warning(f"Invalid window size for {window.title}: {width}x{height}")
+            return self.capture_region(window.x, window.y, window.width, window.height)
+
+        # GDI 资源，需要确保清理
+        hwnd_dc = None
+        mfc_dc = None
+        save_dc = None
+        bitmap = None
+
+        try:
+            # 创建设备上下文
+            hwnd_dc = win32gui.GetWindowDC(hwnd)
+            mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
+            save_dc = mfc_dc.CreateCompatibleDC()
+
+            # 创建位图
+            bitmap = win32ui.CreateBitmap()
+            bitmap.CreateCompatibleBitmap(mfc_dc, width, height)
+            save_dc.SelectObject(bitmap)
+
+            # 使用 PrintWindow 截取窗口内容
+            # PW_RENDERFULLCONTENT (2) 支持 DWM 合成的窗口
+            PW_RENDERFULLCONTENT = 2
+            result = win32gui.PrintWindow(hwnd, save_dc.GetSafeHdc(), PW_RENDERFULLCONTENT)
+
+            if result == 0:
+                # PrintWindow 失败，尝试使用 BitBlt
+                logger.warning(f"PrintWindow failed for {window.title}, trying BitBlt")
+                save_dc.BitBlt(
+                    (0, 0), (width, height), mfc_dc, (0, 0), win32con.SRCCOPY
+                )
+
+            # 转换为 PIL Image
+            bmp_info = bitmap.GetInfo()
+            bmp_bits = bitmap.GetBitmapBits(True)
+            img = Image.frombuffer(
+                "RGB",
+                (bmp_info["bmWidth"], bmp_info["bmHeight"]),
+                bmp_bits,
+                "raw",
+                "BGRX",
+                0,
+                1,
+            )
+
+            return img
+
+        except Exception as e:
+            logger.error(f"Windows capture failed: {e}")
+            return self.capture_region(window.x, window.y, window.width, window.height)
+
+        finally:
+            # 确保 GDI 资源被清理，防止泄漏
+            if bitmap:
+                win32gui.DeleteObject(bitmap.GetHandle())
+            if save_dc:
+                save_dc.DeleteDC()
+            if mfc_dc:
+                mfc_dc.DeleteDC()
+            if hwnd_dc:
+                win32gui.ReleaseDC(hwnd, hwnd_dc)
 
     def _get_window_id_macos(self, window: WindowInfo) -> int | None:
         """获取 macOS 窗口的 window ID"""

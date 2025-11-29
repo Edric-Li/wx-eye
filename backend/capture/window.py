@@ -19,7 +19,7 @@ class WindowInfo:
     width: int
     height: int
     pid: int | None = None
-    window_id: int | None = None  # macOS window number
+    window_id: int | None = None  # macOS: window number, Windows: hwnd
 
     def to_dict(self) -> dict:
         """转换为字典"""
@@ -116,6 +116,8 @@ class WindowFinder:
 
         for win in all_windows:
             if win.width > 100 and win.height > 100:
+                # 获取窗口句柄 (hwnd)
+                hwnd = getattr(win, "_hWnd", None)
                 windows.append(
                     WindowInfo(
                         title=win.title,
@@ -123,6 +125,7 @@ class WindowFinder:
                         y=win.top,
                         width=win.width,
                         height=win.height,
+                        window_id=hwnd,
                     )
                 )
 
@@ -140,6 +143,7 @@ class WindowFinder:
 
         for win in all_windows:
             if win.title == name and win.width > 100 and win.height > 100:
+                hwnd = getattr(win, "_hWnd", None)
                 windows.append(
                     WindowInfo(
                         title=win.title,
@@ -147,6 +151,7 @@ class WindowFinder:
                         y=win.top,
                         width=win.width,
                         height=win.height,
+                        window_id=hwnd,
                     )
                 )
 
@@ -222,6 +227,7 @@ class WindowFinder:
         windows: list[WindowInfo] = []
         for win in gw.getAllWindows():
             if win.width > 100 and win.height > 100 and win.title:
+                hwnd = getattr(win, "_hWnd", None)
                 windows.append(
                     WindowInfo(
                         title=win.title,
@@ -229,6 +235,7 @@ class WindowFinder:
                         y=win.top,
                         width=win.width,
                         height=win.height,
+                        window_id=hwnd,
                     )
                 )
 
