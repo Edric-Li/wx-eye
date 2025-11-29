@@ -43,7 +43,7 @@ class ClaudeAnalyzer:
     # 支持的模型
     MODELS = {
         "haiku": "claude-haiku-4-5-20251001",    # 最快最便宜（Haiku 4.5）
-        "sonnet": "claude-sonnet-4-20250514",     # 平衡
+        "sonnet": "claude-sonnet-4-5-20250929",  # 平衡（Sonnet 4.5）
         "opus": "claude-3-opus-20240229",        # 最强
     }
 
