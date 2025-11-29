@@ -26,6 +26,19 @@ logger = logging.getLogger(__name__)
 # 防止 pyautogui 移动过快
 pyautogui.PAUSE = 0.1
 
+# Windows DPI 感知设置
+# 解决 pygetwindow 与 pyautogui 坐标不一致问题
+if platform.system() == "Windows":
+    try:
+        import ctypes
+        # 设置进程为 DPI 感知，确保坐标一致性
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
 # 输入框相对于窗口的位置偏移（微信聊天窗口）
 # 输入框在窗口底部，水平居中偏右
 INPUT_BOX_OFFSET_FROM_BOTTOM = 60  # 距离窗口底部的像素
@@ -144,7 +157,19 @@ class MessageSender:
 
         try:
             x, y = pos
-            logger.debug(f"点击输入框: ({x}, {y})")
+
+            # 获取屏幕尺寸进行验证
+            screen_width, screen_height = pyautogui.size()
+            logger.info(f"屏幕尺寸: {screen_width}x{screen_height}, 点击坐标: ({x}, {y})")
+
+            # 验证坐标是否在屏幕范围内
+            if x < 0 or y < 0 or x >= screen_width or y >= screen_height:
+                logger.error(
+                    f"点击坐标超出屏幕范围: ({x}, {y}), "
+                    f"屏幕: {screen_width}x{screen_height}"
+                )
+                return False
+
             pyautogui.click(x, y)
             time.sleep(0.1)  # 等待点击生效
             return True
