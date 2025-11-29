@@ -64,13 +64,23 @@ class Event(BaseModel):
 
     def to_dict(self) -> dict[str, Any]:
         """转换为字典（用于 JSON 序列化）"""
-        return {
+        result = {
             "id": self.id,
             "type": self.type,
             "timestamp": self.timestamp,
             "contact": self.contact,
             "payload": self.payload,
         }
+
+        # 兼容前端：对于日志类型，将 payload 字段展平到顶层
+        if self.type == EventType.LOG.value and self.payload:
+            result.update({
+                "level": self.payload.get("level", "info"),
+                "message": self.payload.get("message", ""),
+                "extra": self.payload.get("extra", {}),
+            })
+
+        return result
 
     @classmethod
     def message_received(

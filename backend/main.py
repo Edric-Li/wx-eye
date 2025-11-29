@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import sys
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -481,19 +482,56 @@ class MultiContactCaptureEngine:
         elif self.finder.platform == "win32":
             try:
                 import pygetwindow as gw
+                import win32process
+                import win32gui
 
-                # Windows 上微信独立聊天窗口的标题就是联系人名字
+                # 先找到微信主窗口的 PID
+                wechat_pids = set()
+                for win in gw.getAllWindows():
+                    if win.title in ["微信", "WeChat"]:
+                        try:
+                            _, pid = win32process.GetWindowThreadProcessId(win._hWnd)
+                            wechat_pids.add(pid)
+                        except Exception:
+                            pass
+
+                # 如果找不到微信主窗口，尝试通过窗口类名查找
+                if not wechat_pids:
+                    def enum_windows_callback(hwnd, pids):
+                        try:
+                            class_name = win32gui.GetClassName(hwnd)
+                            # 微信的窗口类名通常包含 "WeChatMainWndForPC"
+                            if "WeChat" in class_name or "微信" in win32gui.GetWindowText(hwnd):
+                                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                                pids.add(pid)
+                        except Exception:
+                            pass
+                        return True
+
+                    win32gui.EnumWindows(enum_windows_callback, wechat_pids)
+
+                # 遍历所有窗口，找出微信进程的聊天窗口
                 for win in gw.getAllWindows():
                     if win.width > 100 and win.height > 100 and win.title:
-                        # 需要进一步过滤，只获取微信的窗口
-                        # Windows 上可能需要通过进程名判断
-                        result[win.title] = WindowInfo(
-                            title=win.title,
-                            x=win.left,
-                            y=win.top,
-                            width=win.width,
-                            height=win.height,
-                        )
+                        try:
+                            hwnd = win._hWnd
+                            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+
+                            # 只添加微信进程的窗口
+                            if pid in wechat_pids:
+                                # 排除微信主窗口
+                                if win.title not in ["微信", "WeChat"]:
+                                    result[win.title] = WindowInfo(
+                                        title=win.title,
+                                        x=win.left,
+                                        y=win.top,
+                                        width=win.width,
+                                        height=win.height,
+                                        window_id=hwnd,
+                                    )
+                        except Exception:
+                            # 如果获取进程失败，跳过该窗口
+                            continue
             except ImportError:
                 pass
 
@@ -526,11 +564,23 @@ engine = MultiContactCaptureEngine()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    # 配置日志
+    # 设置控制台编码为 UTF-8（Windows）
+    if sys.platform == 'win32':
+        try:
+            sys.stdout.reconfigure(encoding='utf-8')
+            sys.stderr.reconfigure(encoding='utf-8')
+        except Exception:
+            pass  # 如果失败就忽略
+
+    # 配置日志处理器（设置 UTF-8 编码以正确显示中文）
     log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter(log_format))
+
     logging.basicConfig(
         level=logging.DEBUG if settings.debug else logging.INFO,
-        format=log_format,
+        handlers=[handler],
+        force=True,
     )
 
     # 添加原始日志收集器到根日志器
