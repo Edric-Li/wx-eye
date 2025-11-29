@@ -302,12 +302,19 @@ class MultiContactCaptureEngine:
 
                             # 像素级比对检测到变化后，提交给 AI 处理器分析消息内容
                             if self._ai_processor:
-                                await self._ai_processor.submit(
-                                    contact_name, img, filename=filename
-                                )
-                                logger.debug(
-                                    f"[{contact_name}] 像素变化检测通过，提交给 AI 分析: {result.description}"
-                                )
+                                if is_first:
+                                    # 首次截图作为基准，跳过 AI 分析
+                                    # 下次变化时的 AI 分析结果会作为基线记录（不广播）
+                                    logger.info(
+                                        f"[{contact_name}] 首次截图，作为基准跳过 AI 分析"
+                                    )
+                                else:
+                                    await self._ai_processor.submit(
+                                        contact_name, img, filename=filename
+                                    )
+                                    logger.debug(
+                                        f"[{contact_name}] 像素变化检测通过，提交给 AI 分析: {result.description}"
+                                    )
                             else:
                                 # AI 未启用时，直接发送截图（保持原有行为）
                                 await manager.send_screenshot(
