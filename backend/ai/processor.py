@@ -427,9 +427,10 @@ class AIMessageProcessor:
         overlap = sum(1 for msg in current if msg in history_set)
 
         if overlap == 0:
-            # 完全没有重叠，可能是新对话
-            logger.warning(f"历史与当前完全无重叠，可能切换了对话")
-            return []  # 保守处理，不报新消息
+            # 完全没有重叠，可能是新对话或 AI 识别差异
+            # 更新基线为当前消息，返回所有当前消息作为新消息
+            logger.warning(f"历史与当前完全无重叠，重置基线并返回当前消息")
+            return list(current)  # 返回所有当前消息
 
         # 有部分重叠但序列不匹配，可能是大量滚动
         # 保守处理：只返回明确不在历史中的消息
