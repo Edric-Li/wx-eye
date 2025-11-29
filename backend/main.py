@@ -71,7 +71,8 @@ class MultiContactCaptureEngine:
         self.screenshot_service = ScreenshotService(screenshot_dir)
 
         self.is_running: bool = False
-        self.interval: float = 0.1  # 100ms
+        self.interval: float = 0.5  # 500ms
+        self._next_interval_override: float | None = None  # 临时间隔（用完即恢复）
 
         # 要监控的联系人列表
         self.contacts: dict[str, ContactMonitor] = {}
@@ -369,7 +370,12 @@ class MultiContactCaptureEngine:
                         },
                     )
 
-                await asyncio.sleep(self.interval)
+                # 使用临时间隔（如有），用完即恢复
+                sleep_interval = self._next_interval_override or self.interval
+                if self._next_interval_override:
+                    logger.debug(f"使用临时间隔: {sleep_interval}s")
+                    self._next_interval_override = None
+                await asyncio.sleep(sleep_interval)
 
             except asyncio.CancelledError:
                 break
@@ -621,8 +627,11 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                             sender = get_sender()
                             result = await sender.send(text, contact, contact_monitor.last_window)
                             # 记录已发送的消息，避免被当作新消息广播
-                            if result.success and engine.ai_processor:
-                                engine.ai_processor.add_sent_message(contact, text)
+                            if result.success:
+                                if engine.ai_processor:
+                                    engine.ai_processor.add_sent_message(contact, text)
+                                # 发送成功后延迟下次截图，等待界面刷新
+                                engine._next_interval_override = 1.0
                             # 发布消息发送事件
                             await manager.emit_message_sent(
                                 contact=contact,
@@ -823,8 +832,11 @@ async def send_message(text: str, contact: str) -> dict[str, Any]:
     result = await sender.send(text, contact, contact_monitor.last_window)
 
     # 记录已发送的消息，避免被当作新消息广播
-    if result.success and engine.ai_processor:
-        engine.ai_processor.add_sent_message(contact, text)
+    if result.success:
+        if engine.ai_processor:
+            engine.ai_processor.add_sent_message(contact, text)
+        # 发送成功后延迟下次截图，等待界面刷新
+        engine._next_interval_override = 1.0
 
     # 发布消息发送事件
     await manager.emit_message_sent(
