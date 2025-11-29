@@ -46,23 +46,13 @@ class Settings(BaseSettings):
     anthropic_base_url: Optional[str] = None  # 自定义 API 地址
     claude_model: str = "haiku"  # haiku / sonnet / opus
 
-    # ============ OCR 配置 ============
-    ocr_languages: str = "ch_sim,en"  # 逗号分隔
-    ocr_gpu: bool = False
-
     # ============ AI 处理配置 ============
     enable_ai: bool = True  # 是否启用 AI 分析
-    enable_ocr_filter: bool = True  # 是否启用 OCR 过滤
     ai_max_retries: int = 3
     ai_timeout: float = 30.0
 
     # ============ 成本控制 ============
     max_ai_calls_per_minute: int = 10  # API 调用限制
-
-    @property
-    def ocr_language_list(self) -> list[str]:
-        """获取 OCR 语言列表"""
-        return [lang.strip() for lang in self.ocr_languages.split(",")]
 
     @property
     def is_ai_enabled(self) -> bool:

@@ -1,6 +1,6 @@
 """
 AI 消息处理器
-整合 OCR、去重、Claude 分析的完整处理流水线
+整合 Claude Vision 分析与本地去重的处理流水线
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from typing import Any, Callable, Optional
 
 from PIL import Image
 
-from .ocr_service import OCRService
 from .message_deduplicator import MessageDeduplicator
 from .claude_analyzer import ClaudeAnalyzer, AnalysisResult
 
@@ -25,7 +24,6 @@ class ProcessingStats:
     """处理统计"""
 
     total_submitted: int = 0
-    ocr_filtered: int = 0  # OCR 过滤（文字无变化）
     dedup_filtered: int = 0  # 去重过滤（无新消息）
     ai_analyzed: int = 0  # AI 分析次数
     ai_failed: int = 0  # AI 分析失败
@@ -37,10 +35,9 @@ class ProcessingResult:
     """单次处理结果"""
 
     contact: str
-    stage: str = ""  # "ocr_filtered", "dedup_filtered", "ai_analyzed", "ai_failed"
+    stage: str = ""  # "dedup_filtered", "ai_analyzed", "ai_failed"
     new_messages: list[dict[str, Any]] = field(default_factory=list)
     summary: str = ""
-    ocr_time_ms: int = 0
     ai_time_ms: int = 0
     tokens_used: int = 0
     error: Optional[str] = None
@@ -54,14 +51,11 @@ class AIMessageProcessor:
     """AI 消息处理器
 
     处理流程：
-    1. OCR 提取文字（过滤表情包等纯图片变化）
-    2. 文字哈希对比（过滤重复内容）
-    3. Claude AI 识别截图中的消息
-    4. 本地去重算法（比对历史，提取新消息）
+    1. Claude AI 识别截图中的消息
+    2. 本地去重算法（比对历史，提取新消息）
 
     特点：
     - 串行处理队列（避免并发和 API 限流）
-    - 四层过滤（节省 90%+ API 成本）
     - 本地去重，更精确可靠
     """
 
@@ -70,8 +64,6 @@ class AIMessageProcessor:
         api_key: str,
         base_url: Optional[str] = None,
         model: str = "sonnet",
-        ocr_languages: list[str] | None = None,
-        ocr_gpu: bool = False,
         enable_ai: bool = True,
     ) -> None:
         """初始化处理器
@@ -80,11 +72,8 @@ class AIMessageProcessor:
             api_key: Anthropic API Key
             base_url: 自定义 API 地址（可选）
             model: Claude 模型选择
-            ocr_languages: OCR 语言列表
-            ocr_gpu: OCR 是否使用 GPU
-            enable_ai: 是否启用 AI 分析（可关闭只用 OCR）
+            enable_ai: 是否启用 AI 分析
         """
-        self.ocr = OCRService(languages=ocr_languages, gpu=ocr_gpu)
         self.dedup = MessageDeduplicator()
         self.claude: ClaudeAnalyzer | None = None
         self.enable_ai = enable_ai
@@ -359,7 +348,6 @@ class AIMessageProcessor:
         Args:
             contact: 指定联系人，为 None 时重置所有
         """
-        self.ocr.reset_cache(contact)
         self.dedup.reset(contact)
 
         # 重置消息历史
@@ -375,7 +363,6 @@ class AIMessageProcessor:
         """获取统计信息"""
         stats = {
             "total_submitted": self.stats.total_submitted,
-            "ocr_filtered": self.stats.ocr_filtered,
             "dedup_filtered": self.stats.dedup_filtered,
             "ai_analyzed": self.stats.ai_analyzed,
             "ai_failed": self.stats.ai_failed,
@@ -389,11 +376,7 @@ class AIMessageProcessor:
 
         # 计算过滤率
         if self.stats.total_submitted > 0:
-            filtered = self.stats.ocr_filtered + self.stats.dedup_filtered
+            filtered = self.stats.dedup_filtered
             stats["filter_rate"] = f"{filtered / self.stats.total_submitted * 100:.1f}%"
 
         return stats
-
-    def preload_ocr(self) -> None:
-        """预加载 OCR 模型"""
-        self.ocr.preload()

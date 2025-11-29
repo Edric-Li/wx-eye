@@ -96,8 +96,6 @@ class MultiContactCaptureEngine:
                     api_key=settings.anthropic_api_key or "",
                     base_url=settings.anthropic_base_url,
                     model=settings.claude_model,
-                    ocr_languages=settings.ocr_language_list,
-                    ocr_gpu=settings.ocr_gpu,
                     enable_ai=settings.is_ai_enabled,
                 )
                 # 设置回调
@@ -301,15 +299,13 @@ class MultiContactCaptureEngine:
                                 img, f"contact_{safe_name}"
                             )
 
-                            # 像素级比对检测到变化后，不直接发送截图给前端
-                            # 而是提交给 AI 处理器，由 OCR 进一步确认是否有文字变化
-                            # 只有 OCR 确认有变化时，才发送截图给前端
+                            # 像素级比对检测到变化后，提交给 AI 处理器分析消息内容
                             if self._ai_processor:
                                 await self._ai_processor.submit(
                                     contact_name, img, filename=filename
                                 )
                                 logger.debug(
-                                    f"[{contact_name}] 像素变化检测通过，提交给 OCR 确认: {result.description}"
+                                    f"[{contact_name}] 像素变化检测通过，提交给 AI 分析: {result.description}"
                                 )
                             else:
                                 # AI 未启用时，直接发送截图（保持原有行为）

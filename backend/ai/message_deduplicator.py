@@ -133,7 +133,7 @@ class MessageDeduplicator:
         self._history_set[contact] = set(normalized)
 
     def parse_messages_from_text(self, raw_text: str) -> list[str]:
-        """从 OCR 文字中解析消息列表
+        """从原始文字中解析消息列表
 
         微信聊天格式通常是：
         - 发送者名称
@@ -141,7 +141,7 @@ class MessageDeduplicator:
         - 消息内容
 
         Args:
-            raw_text: OCR 提取的原始文字
+            raw_text: 提取的原始文字
 
         Returns:
             消息列表
@@ -198,10 +198,10 @@ class MessageDeduplicator:
     ) -> list[ChatMessage]:
         """解析为结构化消息
 
-        尝试从 OCR 文字中提取发送者、时间和内容。
+        尝试从原始文字中提取发送者、时间和内容。
 
         Args:
-            raw_text: OCR 提取的原始文字
+            raw_text: 提取的原始文字
 
         Returns:
             结构化消息列表

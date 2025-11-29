@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-WxEye is a WeChat visual monitoring agent that monitors multiple independent WeChat chat windows, detects changes using perceptual hashing (pHash), and optionally analyzes messages using AI (Claude + OCR).
+WxEye is a WeChat visual monitoring agent that monitors multiple independent WeChat chat windows, detects changes using perceptual hashing (pHash), and optionally analyzes messages using Claude Vision API.
 
 ## Commands
 
@@ -48,10 +48,9 @@ npm run format:check # Check formatting
 │  └─────────────────────────────────────────────────────────────┘ │
 │                                                                   │
 │  capture/                   ai/                                   │
-│  ├── window.py (WindowFinder)  ├── ocr_service.py (EasyOCR)     │
-│  ├── screenshot.py             ├── claude_analyzer.py           │
-│  └── comparator.py (pHash)     ├── message_deduplicator.py      │
-│                                └── processor.py (orchestrator)   │
+│  ├── window.py (WindowFinder)  ├── claude_analyzer.py (Vision)  │
+│  ├── screenshot.py             ├── message_deduplicator.py      │
+│  └── comparator.py (pHash)     └── processor.py (orchestrator)   │
 │  api/                       services/                            │
 │  ├── routes.py              └── message_sender.py (pyautogui)   │
 │  └── websocket.py                                                │
@@ -64,9 +63,8 @@ npm run format:check # Check formatting
 2. **Screenshot Capture**: Captures window content even when occluded (macOS CGWindowListCreateImage)
 3. **Change Detection**: ImageComparator uses pHash to detect significant visual changes
 4. **AI Processing Pipeline** (when enabled):
-   - OCR extracts text from screenshot (EasyOCR)
-   - MessageDeduplicator identifies new messages
-   - ClaudeAnalyzer summarizes new content
+   - ClaudeAnalyzer uses Vision API to extract messages from screenshot
+   - MessageDeduplicator identifies new messages via local dedup
 5. **Message Sending**: UI automation via pyautogui (click input box, paste, press Enter)
 
 ### Configuration
@@ -77,7 +75,6 @@ Key env vars:
 - `ANTHROPIC_API_KEY`: Required for AI features
 - `ANTHROPIC_BASE_URL`: Custom API endpoint (optional)
 - `CLAUDE_MODEL`: haiku/sonnet/opus (default: haiku)
-- `OCR_LANGUAGES`: Comma-separated OCR languages (default: ch_sim,en)
 - `ENABLE_AI`: Toggle AI analysis (default: true)
 
 ### Event System (events/)

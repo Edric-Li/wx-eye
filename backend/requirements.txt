@@ -9,8 +9,6 @@ pydantic-settings>=2.1.0
 
 # AI 模块
 anthropic>=0.18.0
-easyocr>=1.7.0
-numpy>=1.24.0
 
 # 消息发送 (UI 自动化)
 pyautogui>=0.9.54
