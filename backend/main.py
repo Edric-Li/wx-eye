@@ -24,6 +24,7 @@ from typing import Any, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from api import manager, router
 from capture import (
@@ -501,13 +502,21 @@ app.add_middleware(
 Path("static/screenshots").mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# 前端静态文件（如果已构建）
+FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "dist"
+if FRONTEND_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIR / "assets"), name="frontend_assets")
+
 # API 路由
 app.include_router(router, prefix="/api")
 
 
 @app.get("/")
-async def root() -> dict[str, Any]:
-    """根路径"""
+async def root():
+    """根路径 - 返回前端页面或 API 信息"""
+    index_file = FRONTEND_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
     return {
         "name": settings.app_name,
         "version": settings.app_version,
