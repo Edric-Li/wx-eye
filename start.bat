@@ -21,7 +21,17 @@ if errorlevel 1 (
     exit /b 1
 )
 
-:: 检查虚拟环境
+:: 检查虚拟环境是否健康
+if exist ".venv\Scripts\python.exe" (
+    echo [*] 检查虚拟环境...
+    .venv\Scripts\python.exe -m pip --version >nul 2>&1
+    if errorlevel 1 (
+        echo [*] 虚拟环境损坏，正在重建...
+        rmdir /s /q .venv
+    )
+)
+
+:: 创建或激活虚拟环境
 if exist ".venv\Scripts\activate.bat" (
     echo [*] 激活虚拟环境...
     call .venv\Scripts\activate.bat
@@ -36,7 +46,7 @@ if exist ".venv\Scripts\activate.bat" (
     call .venv\Scripts\activate.bat
 )
 
-:: 每次都检查并安装依赖（pip 会跳过已安装的）
+:: 安装依赖
 echo [*] 检查依赖...
 python -m pip install -r requirements.txt -q
 if errorlevel 1 (
