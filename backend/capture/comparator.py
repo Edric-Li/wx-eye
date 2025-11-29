@@ -36,7 +36,7 @@ class ImageComparator:
     def __init__(
         self,
         hash_size: int = 16,  # 哈希大小，越大越精确
-        similar_threshold: int = 5,  # 相似阈值
+        similar_threshold: int = 10,  # 相似阈值（<= 此值认为没变化）
         different_threshold: int = 15,  # 不同阈值
     ) -> None:
         self.hash_size = hash_size

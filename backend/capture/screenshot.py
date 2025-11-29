@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 class ScreenshotService:
     """截图服务"""
 
+    # 裁剪参数：只保留聊天区域，去掉标题栏、输入框和滚动条
+    CROP_TOP = 200      # 顶部裁掉的像素（标题栏）
+    CROP_BOTTOM = 300   # 底部裁掉的像素（输入框）
+    CROP_LEFT = 40      # 左侧裁掉的像素
+    CROP_RIGHT = 40     # 右侧裁掉的像素（滚动条）
+
     def __init__(self, save_dir: str = "static/screenshots") -> None:
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -42,12 +48,49 @@ class ScreenshotService:
         sct_img = self.sct.grab(monitor)
         return Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
 
-    def capture_window(self, window: WindowInfo) -> Image.Image:
-        """截取指定窗口（即使被遮挡也能正确截取）"""
+    def _crop_chat_area(self, image: Image.Image) -> Image.Image:
+        """裁剪出聊天区域，去掉标题栏、输入框和滚动条
+
+        Args:
+            image: 原始截图
+
+        Returns:
+            裁剪后的图片（只包含聊天区域）
+        """
+        width, height = image.size
+
+        # 计算裁剪区域
+        left = self.CROP_LEFT
+        top = self.CROP_TOP
+        right = width - self.CROP_RIGHT
+        bottom = height - self.CROP_BOTTOM
+
+        # 确保裁剪区域有效
+        if bottom <= top or right <= left:
+            logger.warning(f"裁剪区域无效: ({left},{top}) -> ({right},{bottom}), 使用原图")
+            return image
+
+        return image.crop((left, top, right, bottom))
+
+    def capture_window(self, window: WindowInfo, crop_chat_area: bool = True) -> Image.Image:
+        """截取指定窗口（即使被遮挡也能正确截取）
+
+        Args:
+            window: 窗口信息
+            crop_chat_area: 是否裁剪聊天区域（去掉标题栏和输入框）
+
+        Returns:
+            截图（如果 crop_chat_area=True，则只包含聊天区域）
+        """
         if self.platform == "darwin":
-            return self._capture_window_macos(window)
+            img = self._capture_window_macos(window)
         else:
-            return self.capture_region(window.x, window.y, window.width, window.height)
+            img = self.capture_region(window.x, window.y, window.width, window.height)
+
+        if crop_chat_area:
+            img = self._crop_chat_area(img)
+
+        return img
 
     def _capture_window_macos(self, window: WindowInfo) -> Image.Image:
         """macOS: 使用 CGWindowListCreateImage 直接截取窗口内容"""

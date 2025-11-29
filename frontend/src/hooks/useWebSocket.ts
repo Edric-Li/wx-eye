@@ -23,6 +23,27 @@ export interface LogMessage {
   extra: Record<string, unknown>
 }
 
+export interface AIMessageItem {
+  sender: string
+  content: string
+  time?: string
+}
+
+export interface AIMessage {
+  type: 'ai_message'
+  timestamp: string
+  contact: string
+  new_messages: AIMessageItem[]
+  summary: string
+  message_count: number
+  processing_stats: {
+    ocr_time_ms?: number
+    ai_time_ms?: number
+    tokens_used?: number
+    stage?: string
+  }
+}
+
 export interface ContactStatus {
   name: string
   is_visible: boolean
@@ -46,7 +67,7 @@ export interface StatusMessage {
   }
 }
 
-export type WSMessage = ScreenshotMessage | LogMessage | StatusMessage
+export type WSMessage = ScreenshotMessage | LogMessage | StatusMessage | AIMessage
 
 interface UseWebSocketResult {
   isConnected: boolean
@@ -54,6 +75,7 @@ interface UseWebSocketResult {
   currentStatus: string
   screenshots: ScreenshotMessage[]
   logs: LogMessage[]
+  aiMessages: AIMessage[]
   sendCommand: (command: string, params?: Record<string, unknown>) => void
   connect: () => void
   disconnect: () => void
@@ -65,6 +87,7 @@ export function useWebSocket(): UseWebSocketResult {
   const [currentStatus, setCurrentStatus] = useState('stopped')
   const [screenshots, setScreenshots] = useState<ScreenshotMessage[]>([])
   const [logs, setLogs] = useState<LogMessage[]>([])
+  const [aiMessages, setAIMessages] = useState<AIMessage[]>([])
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimeoutRef = useRef<number>()
 
@@ -111,6 +134,10 @@ export function useWebSocket(): UseWebSocketResult {
             setStatus(message.details)
             setCurrentStatus(message.status)
             break
+
+          case 'ai_message':
+            setAIMessages((prev) => [message, ...prev].slice(0, 100))
+            break
         }
       } catch (e) {
         console.error('[WS] Parse error:', e)
@@ -148,6 +175,7 @@ export function useWebSocket(): UseWebSocketResult {
     currentStatus,
     screenshots,
     logs,
+    aiMessages,
     sendCommand,
     connect,
     disconnect,

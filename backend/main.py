@@ -1,6 +1,6 @@
 """
 WxEye - WeChat Visual Monitoring Agent
-主入口文件 - 支持多联系人独立窗口监控
+主入口文件 - 支持多联系人独立窗口监控 + AI 消息分析
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,8 +24,13 @@ from capture import (
     WindowFinder,
     WindowInfo,
 )
+from config import get_settings
+from services.message_sender import get_sender
 
 logger = logging.getLogger(__name__)
+
+# 获取配置
+settings = get_settings()
 
 
 @dataclass
@@ -44,6 +49,7 @@ class MultiContactCaptureEngine:
     """多联系人截图引擎
 
     同时监控多个微信独立聊天窗口，每个联系人独立进行截图对比。
+    集成 AI 消息分析功能。
     """
 
     def __init__(self, screenshot_dir: str = "static/screenshots") -> None:
@@ -61,6 +67,40 @@ class MultiContactCaptureEngine:
         self.significant_captures: int = 0
 
         self._task: asyncio.Task[None] | None = None
+
+        # AI 处理器（延迟初始化）
+        self._ai_processor: Optional[Any] = None
+        self._ai_enabled = settings.is_ai_enabled
+
+    @property
+    def ai_processor(self) -> Optional[Any]:
+        """延迟初始化 AI 处理器"""
+        if self._ai_processor is None and self._ai_enabled:
+            try:
+                from ai import AIMessageProcessor
+
+                self._ai_processor = AIMessageProcessor(
+                    api_key=settings.anthropic_api_key or "",
+                    base_url=settings.anthropic_base_url,
+                    model=settings.claude_model,
+                    ocr_languages=settings.ocr_language_list,
+                    ocr_gpu=settings.ocr_gpu,
+                    enable_ai=settings.is_ai_enabled,
+                )
+                # 设置回调
+                self._ai_processor.set_callback(self._on_ai_result)
+                logger.info("AI 处理器初始化成功")
+            except ImportError as e:
+                logger.warning(f"AI 模块导入失败: {e}")
+                self._ai_enabled = False
+            except Exception as e:
+                logger.error(f"AI 处理器初始化失败: {e}")
+                self._ai_enabled = False
+        return self._ai_processor
+
+    async def _on_ai_result(self, result: Any) -> None:
+        """AI 处理结果回调"""
+        await manager.send_ai_result(result)
 
     def add_contact(self, name: str) -> bool:
         """添加要监控的联系人
@@ -117,14 +157,24 @@ class MultiContactCaptureEngine:
         for contact in self.contacts.values():
             contact.comparator.reset()
 
+        # 启动 AI 处理器
+        if self.ai_processor:
+            await self.ai_processor.start()
+            await manager.send_log("info", "AI 消息分析已启用")
+
         contact_names = list(self.contacts.keys())
-        logger.info(f"启动多窗口监控: 联系人={contact_names}, 间隔={interval}s")
-        await manager.send_log("info", f"启动多窗口监控: 联系人={contact_names}, 间隔={interval}s")
+        ai_status = "已启用" if self._ai_enabled else "未启用"
+        logger.info(f"启动多窗口监控: 联系人={contact_names}, 间隔={interval}s, AI={ai_status}")
+        await manager.send_log(
+            "info",
+            f"启动多窗口监控: 联系人={contact_names}, 间隔={interval}s, AI={ai_status}"
+        )
         await manager.send_status(
             "starting",
             {
                 "contacts": contact_names,
                 "interval": interval,
+                "ai_enabled": self._ai_enabled,
             },
         )
 
@@ -142,16 +192,23 @@ class MultiContactCaptureEngine:
                 await self._task
             self._task = None
 
+        # 停止 AI 处理器
+        if self._ai_processor:
+            await self._ai_processor.stop()
+
         logger.info("截图服务已停止")
         await manager.send_log("info", "截图服务已停止")
-        await manager.send_status(
-            "stopped",
-            {
-                "total_captures": self.total_captures,
-                "significant_captures": self.significant_captures,
-                "contacts": self._get_contacts_status(),
-            },
-        )
+
+        # 包含 AI 统计信息
+        status_details = {
+            "total_captures": self.total_captures,
+            "significant_captures": self.significant_captures,
+            "contacts": self._get_contacts_status(),
+        }
+        if self._ai_processor:
+            status_details["ai_stats"] = self._ai_processor.get_stats()
+
+        await manager.send_status("stopped", status_details)
 
     def _get_contacts_status(self) -> list[dict[str, Any]]:
         """获取所有联系人状态"""
@@ -195,6 +252,11 @@ class MultiContactCaptureEngine:
                         result, is_first = contact.comparator.compare_with_last(img)
 
                         if result.is_significant:
+                            # 只在检测到变化时输出日志
+                            logger.info(
+                                f"[{contact_name}] 检测到变化: distance={result.hash_distance}, "
+                                f"threshold={contact.comparator.similar_threshold}"
+                            )
                             contact.significant_captures += 1
                             self.significant_captures += 1
 
@@ -204,24 +266,35 @@ class MultiContactCaptureEngine:
                                 img, f"contact_{safe_name}"
                             )
 
-                            await manager.send_screenshot(
-                                image=img,
-                                filename=filename,
-                                is_significant=True,
-                                compare_result={
-                                    "level": result.level.value,
-                                    "hash_distance": int(result.hash_distance),
-                                    "description": result.description,
-                                    "is_first": is_first,
-                                    "contact": contact_name,  # 标记属于哪个联系人
-                                },
-                            )
-
-                            await manager.send_log(
-                                "info",
-                                f"[{contact_name}] 检测到变化: {result.description}",
-                                {"contact": contact_name, "filename": filename},
-                            )
+                            # 像素级比对检测到变化后，不直接发送截图给前端
+                            # 而是提交给 AI 处理器，由 OCR 进一步确认是否有文字变化
+                            # 只有 OCR 确认有变化时，才发送截图给前端
+                            if self._ai_processor:
+                                await self._ai_processor.submit(
+                                    contact_name, img, filename=filename
+                                )
+                                logger.debug(
+                                    f"[{contact_name}] 像素变化检测通过，提交给 OCR 确认: {result.description}"
+                                )
+                            else:
+                                # AI 未启用时，直接发送截图（保持原有行为）
+                                await manager.send_screenshot(
+                                    image=img,
+                                    filename=filename,
+                                    is_significant=True,
+                                    compare_result={
+                                        "level": result.level.value,
+                                        "hash_distance": int(result.hash_distance),
+                                        "description": result.description,
+                                        "is_first": is_first,
+                                        "contact": contact_name,
+                                    },
+                                )
+                                await manager.send_log(
+                                    "info",
+                                    f"[{contact_name}] 检测到变化: {result.description}",
+                                    {"contact": contact_name, "filename": filename},
+                                )
                     else:
                         contact.is_visible = False
 
@@ -323,13 +396,22 @@ class MultiContactCaptureEngine:
 
     def get_status(self) -> dict[str, Any]:
         """获取当前状态"""
-        return {
+        status = {
             "is_running": self.is_running,
             "interval": self.interval,
             "total_captures": self.total_captures,
             "significant_captures": self.significant_captures,
             "contacts": self._get_contacts_status(),
+            "ai_enabled": self._ai_enabled,
         }
+        if self._ai_processor:
+            status["ai_stats"] = self._ai_processor.get_stats()
+        return status
+
+    def reset_ai(self, contact: str | None = None) -> None:
+        """重置 AI 处理器状态"""
+        if self._ai_processor:
+            self._ai_processor.reset(contact)
 
 
 # 全局引擎实例
@@ -341,13 +423,15 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # 配置日志
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG if settings.debug else logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
     # 启动时
-    Path("static/screenshots").mkdir(parents=True, exist_ok=True)
-    logger.info("WxEye started (Multi-Contact Mode)")
+    Path(settings.screenshot_dir).mkdir(parents=True, exist_ok=True)
+
+    ai_status = "已配置" if settings.is_ai_enabled else "未配置（缺少 API Key）"
+    logger.info(f"WxEye started (Multi-Contact + AI Mode), AI: {ai_status}")
 
     yield
 
@@ -386,9 +470,10 @@ app.include_router(router, prefix="/api")
 async def root() -> dict[str, Any]:
     """根路径"""
     return {
-        "name": "WxEye",
-        "version": "0.2.0",
-        "mode": "multi-contact",
+        "name": settings.app_name,
+        "version": settings.app_version,
+        "mode": "multi-contact + ai",
+        "ai_enabled": settings.is_ai_enabled,
         "status": engine.get_status(),
     }
 
@@ -443,8 +528,17 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     contact.significant_captures = 0
                 engine.total_captures = 0
                 engine.significant_captures = 0
-                await manager.send_log("info", "所有计数器已重置")
+                engine.reset_ai()  # 同时重置 AI 处理器
+                await manager.send_log("info", "所有计数器已重置（包括 AI 状态）")
                 await manager.send_status("current", engine.get_status())
+
+            elif command == "ai_stats":
+                # 获取 AI 统计信息
+                if engine._ai_processor:
+                    stats = engine._ai_processor.get_stats()
+                    await manager.send_log("info", f"AI 统计: {stats}")
+                else:
+                    await manager.send_log("warning", "AI 处理器未启用")
 
             elif command == "list_wechat_windows":
                 # 列出当前所有微信聊天窗口（帮助用户发现可以监控的窗口）
@@ -514,7 +608,85 @@ async def capture_status() -> dict[str, Any]:
     return engine.get_status()
 
 
+@app.get("/api/ai/status")
+async def ai_status() -> dict[str, Any]:
+    """获取 AI 处理器状态"""
+    return {
+        "enabled": engine._ai_enabled,
+        "configured": settings.is_ai_enabled,
+        "model": settings.claude_model,
+        "stats": engine._ai_processor.get_stats() if engine._ai_processor else None,
+    }
+
+
+@app.post("/api/ai/reset")
+async def reset_ai(contact: str | None = None) -> dict[str, Any]:
+    """重置 AI 处理器状态"""
+    engine.reset_ai(contact)
+    return {
+        "message": f"AI 状态已重置: {contact or '全部'}",
+        "stats": engine._ai_processor.get_stats() if engine._ai_processor else None,
+    }
+
+
+# ============ 消息发送 API ============
+
+
+@app.post("/api/message/send")
+async def send_message(text: str, contact: str) -> dict[str, Any]:
+    """发送微信消息到指定联系人
+
+    通过 UI 自动化发送消息。自动根据联系人窗口位置计算输入框坐标。
+
+    Args:
+        text: 要发送的消息文本
+        contact: 联系人名称（必须是正在监控的联系人）
+    """
+    # 获取联系人的窗口信息
+    if contact not in engine.contacts:
+        return {
+            "success": False,
+            "message": f"联系人 '{contact}' 未在监控列表中",
+            "error": "Contact not monitored",
+        }
+
+    contact_monitor = engine.contacts[contact]
+    if not contact_monitor.last_window:
+        # 尝试重新获取窗口
+        windows = engine._get_all_wechat_chat_windows()
+        if contact in windows:
+            contact_monitor.last_window = windows[contact]
+        else:
+            return {
+                "success": False,
+                "message": f"找不到联系人 '{contact}' 的窗口，请确保聊天窗口已打开",
+                "error": "Window not found",
+            }
+
+    sender = get_sender()
+    sender.set_window(contact_monitor.last_window)
+    result = await sender.send(text)
+    return {
+        "success": result.success,
+        "message": result.message,
+        "elapsed_ms": result.elapsed_ms,
+        "error": result.error,
+        "contact": contact,
+    }
+
+
+@app.get("/api/message/stats")
+async def message_stats() -> dict[str, Any]:
+    """获取消息发送统计"""
+    sender = get_sender()
+    return sender.get_stats()
+
+
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app,
+        host=settings.host,
+        port=settings.port,
+    )

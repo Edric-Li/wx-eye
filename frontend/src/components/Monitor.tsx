@@ -2,9 +2,11 @@ import React, { useState, useMemo } from 'react'
 import { useWebSocket, ScreenshotMessage, ContactStatus } from '../hooks/useWebSocket'
 import { ImageViewer } from './ImageViewer'
 import { LogPanel } from './LogPanel'
+import { AIMessagePanel } from './AIMessagePanel'
+import { SendMessagePanel } from './SendMessagePanel'
 
 export function Monitor() {
-  const { isConnected, status, currentStatus, screenshots, logs, sendCommand } = useWebSocket()
+  const { isConnected, status, currentStatus, screenshots, logs, aiMessages, sendCommand } = useWebSocket()
   const [newContact, setNewContact] = useState('')
   const [interval, setInterval] = useState(0.1)
   const [selectedImage, setSelectedImage] = useState<ScreenshotMessage | null>(null)
@@ -244,9 +246,22 @@ export function Monitor() {
           </div>
         </div>
 
-        {/* Log Panel */}
-        <div style={styles.logSection}>
-          <LogPanel logs={logs} />
+        {/* AI Message Panel */}
+        <div style={styles.aiSection}>
+          <AIMessagePanel aiMessages={aiMessages} />
+        </div>
+
+        {/* Right Sidebar */}
+        <div style={styles.rightSidebar}>
+          {/* Send Message Panel */}
+          <div style={styles.sendSection}>
+            <SendMessagePanel contacts={contacts.map((c: ContactStatus) => c.name)} />
+          </div>
+
+          {/* Log Panel */}
+          <div style={styles.logSection}>
+            <LogPanel logs={logs} />
+          </div>
         </div>
       </div>
 
@@ -482,10 +497,20 @@ const styles: { [key: string]: React.CSSProperties } = {
   },
   mainContent: {
     display: 'grid',
-    gridTemplateColumns: '1fr 350px',
+    gridTemplateColumns: '1fr 400px 320px',
     gap: '16px',
     padding: '16px 24px',
     minHeight: 'calc(100vh - 280px)',
+  },
+  rightSidebar: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '16px',
+  },
+  sendSection: {
+    backgroundColor: '#16213e',
+    borderRadius: '8px',
+    overflow: 'hidden',
   },
   screenshotsSection: {
     backgroundColor: '#16213e',
@@ -552,9 +577,16 @@ const styles: { [key: string]: React.CSSProperties } = {
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
   },
+  aiSection: {
+    backgroundColor: '#16213e',
+    borderRadius: '8px',
+    overflow: 'hidden',
+  },
   logSection: {
     backgroundColor: '#16213e',
     borderRadius: '8px',
     overflow: 'hidden',
+    flex: 1,
+    minHeight: '200px',
   },
 }
