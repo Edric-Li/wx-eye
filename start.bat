@@ -38,7 +38,7 @@ if exist ".venv\Scripts\activate.bat" (
 
 :: 每次都检查并安装依赖（pip 会跳过已安装的）
 echo [*] 检查依赖...
-pip install -r requirements.txt -q
+python -m pip install -r requirements.txt -q
 if errorlevel 1 (
     echo [错误] 安装依赖失败
     pause
