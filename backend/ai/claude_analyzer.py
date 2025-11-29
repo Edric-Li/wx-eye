@@ -120,9 +120,10 @@ class ClaudeAnalyzer:
 返回JSON二维数组：[["发送者", "消息内容"], ...]
 
 发送者规则：
-- 右侧绿色气泡填 "$self"
+- 右侧绿色气泡（自己发的）填 "$self"
 - 左侧白色气泡：群聊填消息上方的昵称，私聊填 "$other"
-- 忽略灰色引用气泡
+- 如果左侧消息的昵称被截断或遮挡看不完整，跳过该消息不返回
+- 忽略灰色引用气泡和系统提示
 - 按时间顺序从上到下
 
 示例：[["$self", "你好"], ["张三", "收到"], ["$other", "好的"]]
@@ -300,6 +301,9 @@ class ClaudeAnalyzer:
                 result.new_messages = []
 
             result.has_new_content = len(result.new_messages) > 0
+
+            # 记录 AI 原始输出用于调试
+            logger.info(f"[{contact}] [AI] 原始输出: {raw_text[:500]}")
 
         except json.JSONDecodeError as e:
             logger.warning(f"[{contact}] JSON 解析失败: {e}\nAI 原始回复:\n{raw_text}")

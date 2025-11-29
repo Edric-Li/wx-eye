@@ -39,7 +39,9 @@ class Settings(BaseSettings):
 
     # ============ 截图配置 ============
     screenshot_dir: str = "static/screenshots"
-    capture_interval: float = 0.5  # 截图间隔（秒）
+    # 动态间隔：空闲时快速轮询，繁忙时放慢
+    capture_interval_idle: float = 0.05  # 空闲时 50ms
+    capture_interval_busy: float = 1.0   # AI 处理中时 1 秒
 
     # ============ Claude AI 配置 ============
     anthropic_api_key: Optional[str] = None

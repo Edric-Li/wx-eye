@@ -84,6 +84,7 @@ class AIMessageProcessor:
         # 处理队列: (contact, image, callback, filename)
         self._queue: asyncio.Queue[tuple[str, Image.Image, Optional[Callable], Optional[str]]] = asyncio.Queue()
         self._is_running = False
+        self._is_processing = False  # 当前是否有任务正在处理
         self._task: asyncio.Task | None = None
 
         # 统计
@@ -208,33 +209,39 @@ class AIMessageProcessor:
                     timeout=1.0,
                 )
 
-                # 处理
-                result = await self._process_single(contact, image, filename)
+                # 标记正在处理
+                self._is_processing = True
+                try:
+                    # 处理
+                    result = await self._process_single(contact, image, filename)
 
-                # 触发回调
-                if callback:
-                    try:
-                        if asyncio.iscoroutinefunction(callback):
-                            await callback(result)
-                        else:
-                            callback(result)
-                    except Exception as e:
-                        logger.error(f"回调执行失败: {e}")
+                    # 触发回调
+                    if callback:
+                        try:
+                            if asyncio.iscoroutinefunction(callback):
+                                await callback(result)
+                            else:
+                                callback(result)
+                        except Exception as e:
+                            logger.error(f"回调执行失败: {e}")
 
-                if self._on_result:
-                    try:
-                        if asyncio.iscoroutinefunction(self._on_result):
-                            await self._on_result(result)
-                        else:
-                            self._on_result(result)
-                    except Exception as e:
-                        logger.error(f"全局回调执行失败: {e}")
+                    if self._on_result:
+                        try:
+                            if asyncio.iscoroutinefunction(self._on_result):
+                                await self._on_result(result)
+                            else:
+                                self._on_result(result)
+                        except Exception as e:
+                            logger.error(f"全局回调执行失败: {e}")
+                finally:
+                    self._is_processing = False
 
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
             except Exception as e:
+                self._is_processing = False
                 logger.exception(f"处理循环错误: {e}")
 
     async def _process_single(
@@ -524,6 +531,11 @@ class AIMessageProcessor:
                 del self._sent_messages[contact]
 
         logger.info(f"已重置处理状态: {contact or '全部'}")
+
+    @property
+    def is_busy(self) -> bool:
+        """检查是否有任务在执行或排队"""
+        return self._is_processing or self._queue.qsize() > 0
 
     def get_stats(self) -> dict[str, Any]:
         """获取统计信息"""

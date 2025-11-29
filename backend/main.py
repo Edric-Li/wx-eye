@@ -126,7 +126,9 @@ class MultiContactCaptureEngine:
         self.screenshot_service = ScreenshotService(screenshot_dir)
 
         self.is_running: bool = False
-        self.interval: float = 0.5  # 500ms
+        # 动态间隔配置
+        self.interval_idle: float = 0.05  # 空闲时 50ms，快速检测变化
+        self.interval_busy: float = 1.0   # AI 处理中时 1 秒，避免积压
         self._next_interval_override: float | None = None  # 临时间隔（用完即恢复）
 
         # 要监控的联系人列表
@@ -230,22 +232,24 @@ class MultiContactCaptureEngine:
 
         contact_names = list(self.contacts.keys())
         ai_status = "已启用" if self._ai_enabled else "未启用"
-        logger.info(f"启动多窗口监控: 联系人={contact_names}, 间隔={self.interval}s, AI={ai_status}")
+        interval_info = f"空闲={self.interval_idle}s/繁忙={self.interval_busy}s"
+        logger.info(f"启动多窗口监控: 联系人={contact_names}, 间隔={interval_info}, AI={ai_status}")
         await manager.send_log(
             "info",
-            f"启动多窗口监控: 联系人={contact_names}, 间隔={self.interval}s, AI={ai_status}"
+            f"启动多窗口监控: 联系人={contact_names}, 间隔={interval_info}, AI={ai_status}"
         )
         await manager.send_status(
             "starting",
             {
                 "contacts": contact_names,
-                "interval": self.interval,
+                "interval_idle": self.interval_idle,
+                "interval_busy": self.interval_busy,
                 "ai_enabled": self._ai_enabled,
             },
         )
 
         # 发布监控启动事件
-        await manager.emit_monitor_started(contacts=contact_names, interval=self.interval)
+        await manager.emit_monitor_started(contacts=contact_names, interval=self.interval_idle)
 
         self._task = asyncio.create_task(self._capture_loop())
 
@@ -423,11 +427,18 @@ class MultiContactCaptureEngine:
                         },
                     )
 
-                # 使用临时间隔（如有），用完即恢复
-                sleep_interval = self._next_interval_override or self.interval
+                # 计算下次间隔
                 if self._next_interval_override:
+                    # 临时间隔（如发送消息后），用完即恢复
+                    sleep_interval = self._next_interval_override
                     logger.debug(f"使用临时间隔: {sleep_interval}s")
                     self._next_interval_override = None
+                elif self._ai_processor and self._ai_processor.is_busy:
+                    # AI 处理中，放慢轮询避免积压
+                    sleep_interval = self.interval_busy
+                else:
+                    # 空闲时快速轮询，及时检测变化
+                    sleep_interval = self.interval_idle
                 await asyncio.sleep(sleep_interval)
 
             except asyncio.CancelledError:
@@ -541,7 +552,8 @@ class MultiContactCaptureEngine:
         """获取当前状态"""
         status = {
             "is_running": self.is_running,
-            "interval": self.interval,
+            "interval_idle": self.interval_idle,
+            "interval_busy": self.interval_busy,
             "total_captures": self.total_captures,
             "significant_captures": self.significant_captures,
             "contacts": self._get_contacts_status(),
@@ -736,7 +748,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                                 if engine.ai_processor:
                                     engine.ai_processor.add_sent_message(contact, text)
                                 # 发送成功后延迟下次截图，等待界面刷新
-                                engine._next_interval_override = 1.0
+                                engine._next_interval_override = 2.0
                             # 发布消息发送事件
                             await manager.emit_message_sent(
                                 contact=contact,
@@ -956,7 +968,7 @@ async def send_message(text: str, contact: str) -> dict[str, Any]:
         if engine.ai_processor:
             engine.ai_processor.add_sent_message(contact, text)
         # 发送成功后延迟下次截图，等待界面刷新
-        engine._next_interval_override = 1.0
+        engine._next_interval_override = 2.0
 
     # 发布消息发送事件
     await manager.emit_message_sent(
