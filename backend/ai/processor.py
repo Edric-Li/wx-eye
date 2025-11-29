@@ -399,45 +399,54 @@ class AIMessageProcessor:
         if not history or not current:
             return []
 
-        # 尝试匹配历史的后缀（从最长开始）
-        # 限制最大匹配长度，避免性能问题
-        max_suffix_len = min(len(history), len(current), 50)
+        new_start = self._find_overlap_end(history, current)
 
+        if new_start is None:
+            # 完全没有重叠
+            logger.warning("历史与当前完全无重叠，重置基线并返回当前消息")
+            return list(current)
+
+        new_messages = list(current[new_start:])
+        if new_messages:
+            logger.debug(f"识别新消息: {len(new_messages)} 条")
+        return new_messages
+
+    def _find_overlap_end(
+        self,
+        history: list[tuple[str, str]],
+        current: list[tuple[str, str]],
+    ) -> int | None:
+        """找到历史与当前重叠区域的结束位置
+
+        使用两级匹配策略：
+        1. 后缀序列匹配：找历史后缀在当前中的完整匹配
+        2. 锚点匹配：找历史中任意一条消息在当前中的位置
+
+        Returns:
+            重叠结束后的位置索引（新消息从此开始），无重叠返回 None
+        """
+        if not history or not current:
+            return None
+
+        # 策略1：后缀序列匹配（优先，更精确）
+        max_suffix_len = min(len(history), len(current), 50)
         for suffix_len in range(max_suffix_len, 0, -1):
             suffix = history[-suffix_len:]
-
-            # 在当前消息中查找这个后缀序列
             match_pos = self._find_sequence(current, suffix)
-
             if match_pos >= 0:
-                # 找到匹配，后缀结束位置之后的就是新消息
-                new_start = match_pos + suffix_len
-                new_messages = current[new_start:]
+                logger.debug(f"后缀匹配: len={suffix_len}, pos={match_pos}")
+                return match_pos + suffix_len
 
-                if new_messages:
-                    logger.debug(
-                        f"后缀匹配成功: 匹配长度={suffix_len}, "
-                        f"匹配位置={match_pos}, 新消息数={len(new_messages)}"
-                    )
-                return new_messages
+        # 策略2：锚点匹配（后备，处理 AI 识别差异）
+        for anchor_idx in range(len(history) - 1, -1, -1):
+            anchor = history[anchor_idx]
+            # 从后向前找（取最后出现的位置）
+            for pos in range(len(current) - 1, -1, -1):
+                if current[pos] == anchor:
+                    logger.debug(f"锚点匹配: anchor_idx={anchor_idx}, pos={pos}")
+                    return pos + 1
 
-        # 没有找到任何匹配
-        # 检查是否是完全不同的消息（可能切换了聊天或大量滚动）
-        history_set = set(history)
-        overlap = sum(1 for msg in current if msg in history_set)
-
-        if overlap == 0:
-            # 完全没有重叠，可能是新对话或 AI 识别差异
-            # 更新基线为当前消息，返回所有当前消息作为新消息
-            logger.warning(f"历史与当前完全无重叠，重置基线并返回当前消息")
-            return list(current)  # 返回所有当前消息
-
-        # 有部分重叠但序列不匹配，可能是大量滚动
-        # 保守处理：只返回明确不在历史中的消息
-        new_messages = [msg for msg in current if msg not in history_set]
-        if new_messages:
-            logger.debug(f"序列不匹配，使用集合去重: {len(new_messages)} 条新消息")
-        return new_messages
+        return None
 
     def _find_sequence(
         self,
@@ -453,7 +462,6 @@ class AIMessageProcessor:
             return -1
 
         seq_len = len(sequence)
-        # 从前向后查找（找第一个匹配）
         for i in range(len(messages) - seq_len + 1):
             if messages[i:i + seq_len] == sequence:
                 return i
@@ -468,24 +476,33 @@ class AIMessageProcessor:
     ) -> list[tuple[str, str]]:
         """合并历史记录
 
-        策略：保留历史中当前不可见的部分 + 当前可见的全部
-        这样可以处理滚动场景。
+        策略：找历史与当前的重叠区域，然后正确拼接。
+        支持滚动场景，保留重复消息。
+
+        示例:
+            历史: [A, B, B, C]
+            当前: [B, C, D, D]
+            重叠: [B, C]
+            合并: [A, B, B, C, D, D]
         """
         if not history:
-            return current[-max_size:] if len(current) > max_size else current.copy()
+            result = current.copy()
+        elif not current:
+            result = history.copy()
+        else:
+            new_start = self._find_overlap_end(history, current)
+            if new_start is None:
+                # 完全无重叠，用当前替换
+                logger.warning("合并历史: 完全无重叠，用当前消息替换历史")
+                result = current.copy()
+            else:
+                # 历史 + 当前新增部分
+                result = list(history) + list(current[new_start:])
 
-        # 找出历史中不在当前可见范围的消息（已滚出屏幕的旧消息）
-        current_set = set(current)
-        old_messages = [msg for msg in history if msg not in current_set]
-
-        # 合并：旧消息 + 当前消息
-        merged = old_messages + list(current)
-
-        # 限制大小，保留最新的
-        if len(merged) > max_size:
-            merged = merged[-max_size:]
-
-        return merged
+        # 限制大小
+        if len(result) > max_size:
+            result = result[-max_size:]
+        return result
 
     def reset(self, contact: str | None = None) -> None:
         """重置处理状态
