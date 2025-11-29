@@ -34,14 +34,15 @@ if exist ".venv\Scripts\activate.bat" (
         exit /b 1
     )
     call .venv\Scripts\activate.bat
+)
 
-    echo [*] 安装依赖...
-    pip install -r requirements.txt
-    if errorlevel 1 (
-        echo [错误] 安装依赖失败
-        pause
-        exit /b 1
-    )
+:: 每次都检查并安装依赖（pip 会跳过已安装的）
+echo [*] 检查依赖...
+pip install -r requirements.txt -q
+if errorlevel 1 (
+    echo [错误] 安装依赖失败
+    pause
+    exit /b 1
 )
 
 echo.
