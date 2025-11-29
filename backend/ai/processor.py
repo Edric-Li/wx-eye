@@ -339,10 +339,25 @@ class AIMessageProcessor:
         contact: str,
         current_messages: list[tuple[str, str]],
     ) -> list[tuple[str, str]]:
-        """本地去重算法
+        """本地去重算法 - 最长后缀序列匹配
 
-        比对当前消息和历史消息，找出新增的消息。
-        微信消息是追加到底部的，所以只需要找尾部新增的部分。
+        核心思想：找历史消息的最长连续后缀在当前消息中的位置，
+        该位置之后的消息就是新消息。
+
+        示例1 - 正常追加:
+            历史: [A, B, C]
+            当前: [A, B, C, D, E]
+            匹配后缀 [A, B, C] 在位置 0-2，新消息: [D, E]
+
+        示例2 - 重复消息:
+            历史: [A, B, C]
+            当前: [A, B, C, E, C]
+            匹配后缀 [A, B, C] 在位置 0-2，新消息: [E, C]
+
+        示例3 - 历史被滚出:
+            历史: [A, B, C, D]
+            当前: [C, D, E, F]  (A, B 已滚出屏幕)
+            匹配后缀 [C, D] 在位置 0-1，新消息: [E, F]
 
         Args:
             contact: 联系人
@@ -354,56 +369,122 @@ class AIMessageProcessor:
         history = self._message_history.get(contact, [])
 
         if not history:
-            # 首次识别，全部作为新消息
+            # 首次识别，记录但不作为新消息（避免广播历史）
             self._message_history[contact] = current_messages.copy()
-            return current_messages
+            logger.info(f"[{contact}] 首次识别，记录 {len(current_messages)} 条消息作为基线")
+            return []
 
         if not current_messages:
             return []
 
-        # 找到历史消息在当前消息中的位置
-        # 策略：找最长的尾部匹配
-        new_messages = []
+        # 最长后缀序列匹配算法
+        new_messages = self._find_new_messages_by_suffix_match(history, current_messages)
 
-        # 方法：从当前消息末尾向前找，直到找到与历史末尾匹配的位置
-        history_set = set(history)
-
-        # 简单方法：找出不在历史中的消息（保持顺序）
-        # 但要考虑相同内容可能出现多次
-
-        # 更好的方法：序列比对，找尾部新增
-        # 假设历史是 [A, B, C]，当前是 [A, B, C, D, E]
-        # 那么新增是 [D, E]
-
-        # 找到历史最后一条在当前列表中的位置
-        if history:
-            last_history = history[-1]
-            last_match_idx = -1
-
-            # 从后向前找历史最后一条消息的位置
-            for i in range(len(current_messages) - 1, -1, -1):
-                if current_messages[i] == last_history:
-                    last_match_idx = i
-                    break
-
-            if last_match_idx >= 0:
-                # 找到了，新消息是 last_match_idx 之后的
-                new_messages = current_messages[last_match_idx + 1:]
-            else:
-                # 没找到历史最后一条，可能是滚动了
-                # 尝试找任意匹配点
-                for i in range(len(current_messages) - 1, -1, -1):
-                    if current_messages[i] in history_set:
-                        new_messages = current_messages[i + 1:]
-                        break
-                else:
-                    # 完全没有匹配，可能是新对话，全部作为新消息
-                    new_messages = current_messages
-
-        # 更新历史
-        self._message_history[contact] = current_messages.copy()
+        # 更新历史：合并而非替换，处理滚动场景
+        self._message_history[contact] = self._merge_history(
+            history, current_messages, max_size=200
+        )
 
         return new_messages
+
+    def _find_new_messages_by_suffix_match(
+        self,
+        history: list[tuple[str, str]],
+        current: list[tuple[str, str]],
+    ) -> list[tuple[str, str]]:
+        """通过后缀匹配找出新消息
+
+        从历史的完整序列开始，逐步缩短，找到在当前消息中能匹配的最长后缀。
+        """
+        if not history or not current:
+            return []
+
+        # 尝试匹配历史的后缀（从最长开始）
+        # 限制最大匹配长度，避免性能问题
+        max_suffix_len = min(len(history), len(current), 50)
+
+        for suffix_len in range(max_suffix_len, 0, -1):
+            suffix = history[-suffix_len:]
+
+            # 在当前消息中查找这个后缀序列
+            match_pos = self._find_sequence(current, suffix)
+
+            if match_pos >= 0:
+                # 找到匹配，后缀结束位置之后的就是新消息
+                new_start = match_pos + suffix_len
+                new_messages = current[new_start:]
+
+                if new_messages:
+                    logger.debug(
+                        f"后缀匹配成功: 匹配长度={suffix_len}, "
+                        f"匹配位置={match_pos}, 新消息数={len(new_messages)}"
+                    )
+                return new_messages
+
+        # 没有找到任何匹配
+        # 检查是否是完全不同的消息（可能切换了聊天或大量滚动）
+        history_set = set(history)
+        overlap = sum(1 for msg in current if msg in history_set)
+
+        if overlap == 0:
+            # 完全没有重叠，可能是新对话
+            logger.warning(f"历史与当前完全无重叠，可能切换了对话")
+            return []  # 保守处理，不报新消息
+
+        # 有部分重叠但序列不匹配，可能是大量滚动
+        # 保守处理：只返回明确不在历史中的消息
+        new_messages = [msg for msg in current if msg not in history_set]
+        if new_messages:
+            logger.debug(f"序列不匹配，使用集合去重: {len(new_messages)} 条新消息")
+        return new_messages
+
+    def _find_sequence(
+        self,
+        messages: list[tuple[str, str]],
+        sequence: list[tuple[str, str]],
+    ) -> int:
+        """在消息列表中查找连续序列的起始位置
+
+        Returns:
+            匹配的起始位置，未找到返回 -1
+        """
+        if not sequence or len(sequence) > len(messages):
+            return -1
+
+        seq_len = len(sequence)
+        # 从前向后查找（找第一个匹配）
+        for i in range(len(messages) - seq_len + 1):
+            if messages[i:i + seq_len] == sequence:
+                return i
+
+        return -1
+
+    def _merge_history(
+        self,
+        history: list[tuple[str, str]],
+        current: list[tuple[str, str]],
+        max_size: int = 200,
+    ) -> list[tuple[str, str]]:
+        """合并历史记录
+
+        策略：保留历史中当前不可见的部分 + 当前可见的全部
+        这样可以处理滚动场景。
+        """
+        if not history:
+            return current[-max_size:] if len(current) > max_size else current.copy()
+
+        # 找出历史中不在当前可见范围的消息（已滚出屏幕的旧消息）
+        current_set = set(current)
+        old_messages = [msg for msg in history if msg not in current_set]
+
+        # 合并：旧消息 + 当前消息
+        merged = old_messages + list(current)
+
+        # 限制大小，保留最新的
+        if len(merged) > max_size:
+            merged = merged[-max_size:]
+
+        return merged
 
     def reset(self, contact: str | None = None) -> None:
         """重置处理状态
