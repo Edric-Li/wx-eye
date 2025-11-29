@@ -16,8 +16,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -38,6 +40,58 @@ from events import Event, get_event_bus, get_subscriber_manager
 from services.message_sender import get_sender
 
 logger = logging.getLogger(__name__)
+
+
+# ============ 原始日志收集器 ============
+
+class RawLogCollector(logging.Handler):
+    """收集原始日志并存储，用于 WebSocket 推送"""
+
+    def __init__(self, maxlen: int = 500) -> None:
+        super().__init__()
+        self.logs: deque[dict[str, Any]] = deque(maxlen=maxlen)
+        self._subscribers: set[WebSocket] = set()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """处理日志记录"""
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "level": record.levelname.lower(),
+            "logger": record.name,
+            "message": self.format(record),
+        }
+        self.logs.append(log_entry)
+
+        # 异步推送给订阅者
+        if self._subscribers:
+            asyncio.create_task(self._broadcast(log_entry))
+
+    async def _broadcast(self, log_entry: dict[str, Any]) -> None:
+        """广播日志给所有订阅者"""
+        message = {"type": "raw_log", **log_entry}
+        disconnected = set()
+        for ws in self._subscribers:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                disconnected.add(ws)
+        self._subscribers -= disconnected
+
+    def subscribe(self, ws: WebSocket) -> None:
+        """订阅原始日志"""
+        self._subscribers.add(ws)
+
+    def unsubscribe(self, ws: WebSocket) -> None:
+        """取消订阅"""
+        self._subscribers.discard(ws)
+
+    def get_logs(self, limit: int = 100) -> list[dict[str, Any]]:
+        """获取最近的日志"""
+        return list(self.logs)[-limit:]
+
+
+# 全局日志收集器
+raw_log_collector = RawLogCollector()
 
 # 获取配置
 settings = get_settings()
@@ -149,11 +203,10 @@ class MultiContactCaptureEngine:
         """获取所有监控的联系人名称列表"""
         return list(self.contacts.keys())
 
-    async def start(self, interval: float = 0.1) -> None:
+    async def start(self) -> None:
         """启动截图服务
 
-        Args:
-            interval: 截图间隔（秒），默认 0.1 秒
+        间隔固定为 0.5 秒（在 __init__ 中设置）
         """
         if self.is_running:
             await manager.send_log("warning", "截图服务已在运行")
@@ -163,7 +216,6 @@ class MultiContactCaptureEngine:
             await manager.send_log("error", "没有添加任何联系人，请先添加联系人")
             return
 
-        self.interval = interval
         self.is_running = True
 
         # 重置所有联系人的比较器
@@ -177,22 +229,22 @@ class MultiContactCaptureEngine:
 
         contact_names = list(self.contacts.keys())
         ai_status = "已启用" if self._ai_enabled else "未启用"
-        logger.info(f"启动多窗口监控: 联系人={contact_names}, 间隔={interval}s, AI={ai_status}")
+        logger.info(f"启动多窗口监控: 联系人={contact_names}, 间隔={self.interval}s, AI={ai_status}")
         await manager.send_log(
             "info",
-            f"启动多窗口监控: 联系人={contact_names}, 间隔={interval}s, AI={ai_status}"
+            f"启动多窗口监控: 联系人={contact_names}, 间隔={self.interval}s, AI={ai_status}"
         )
         await manager.send_status(
             "starting",
             {
                 "contacts": contact_names,
-                "interval": interval,
+                "interval": self.interval,
                 "ai_enabled": self._ai_enabled,
             },
         )
 
         # 发布监控启动事件
-        await manager.emit_monitor_started(contacts=contact_names, interval=interval)
+        await manager.emit_monitor_started(contacts=contact_names, interval=self.interval)
 
         self._task = asyncio.create_task(self._capture_loop())
 
@@ -475,10 +527,15 @@ engine = MultiContactCaptureEngine()
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # 配置日志
+    log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     logging.basicConfig(
         level=logging.DEBUG if settings.debug else logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        format=log_format,
     )
+
+    # 添加原始日志收集器到根日志器
+    raw_log_collector.setFormatter(logging.Formatter(log_format))
+    logging.getLogger().addHandler(raw_log_collector)
 
     # 启动时
     Path(settings.screenshot_dir).mkdir(parents=True, exist_ok=True)
@@ -589,13 +646,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
             # ============ 监控命令（新格式） ============
             elif command in ("monitor.start", "start"):
-                interval = data.get("interval", 0.1)
                 contacts = data.get("contacts")
                 # 如果指定了联系人列表，先添加
                 if contacts:
                     for contact_name in contacts:
                         engine.add_contact(contact_name.strip())
-                await engine.start(interval)
+                await engine.start()
 
             elif command in ("monitor.stop", "stop"):
                 await engine.stop()
@@ -706,6 +762,20 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 else:
                     await manager.send_log("warning", "AI 处理器未启用")
 
+            # ============ 原始日志订阅 ============
+            elif command == "logs.subscribe":
+                raw_log_collector.subscribe(websocket)
+                # 发送历史日志
+                history = raw_log_collector.get_logs(limit=100)
+                await websocket.send_json({
+                    "type": "logs.history",
+                    "logs": history,
+                })
+
+            elif command == "logs.unsubscribe":
+                raw_log_collector.unsubscribe(websocket)
+                await websocket.send_json({"type": "logs.unsubscribed"})
+
             else:
                 # 未知命令
                 logger.warning(f"Unknown WebSocket command: {command}")
@@ -715,6 +785,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     except Exception as e:
         logger.exception(f"WebSocket error: {e}")
     finally:
+        raw_log_collector.unsubscribe(websocket)
         await manager.disconnect(websocket)
 
 
@@ -753,9 +824,9 @@ async def list_wechat_windows() -> dict[str, Any]:
 
 
 @app.post("/api/capture/start")
-async def start_capture(interval: float = 0.1) -> dict[str, Any]:
+async def start_capture() -> dict[str, Any]:
     """启动截图服务"""
-    await engine.start(interval)
+    await engine.start()
     return {"message": "Capture started", "status": engine.get_status()}
 
 

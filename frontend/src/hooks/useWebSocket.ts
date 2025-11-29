@@ -15,12 +15,12 @@ export interface ScreenshotMessage {
   }
 }
 
-export interface LogMessage {
-  type: 'log'
+export interface RawLogMessage {
+  type: 'raw_log'
   timestamp: string
-  level: 'info' | 'warning' | 'error'
+  level: string
+  logger: string
   message: string
-  extra: Record<string, unknown>
 }
 
 export interface AIMessageItem {
@@ -67,18 +67,20 @@ export interface StatusMessage {
   }
 }
 
-export type WSMessage = ScreenshotMessage | LogMessage | StatusMessage | AIMessage
+export type WSMessage = ScreenshotMessage | StatusMessage | AIMessage | RawLogMessage
 
 interface UseWebSocketResult {
   isConnected: boolean
   status: StatusMessage['details']
   currentStatus: string
   screenshots: ScreenshotMessage[]
-  logs: LogMessage[]
+  rawLogs: RawLogMessage[]
   aiMessages: AIMessage[]
   sendCommand: (command: string, params?: Record<string, unknown>) => void
   connect: () => void
   disconnect: () => void
+  subscribeRawLogs: () => void
+  unsubscribeRawLogs: () => void
 }
 
 export function useWebSocket(): UseWebSocketResult {
@@ -86,7 +88,7 @@ export function useWebSocket(): UseWebSocketResult {
   const [status, setStatus] = useState<StatusMessage['details']>({})
   const [currentStatus, setCurrentStatus] = useState('stopped')
   const [screenshots, setScreenshots] = useState<ScreenshotMessage[]>([])
-  const [logs, setLogs] = useState<LogMessage[]>([])
+  const [rawLogs, setRawLogs] = useState<RawLogMessage[]>([])
   const [aiMessages, setAIMessages] = useState<AIMessage[]>([])
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimeoutRef = useRef<number>()
@@ -119,24 +121,28 @@ export function useWebSocket(): UseWebSocketResult {
 
     ws.onmessage = (event) => {
       try {
-        const message: WSMessage = JSON.parse(event.data)
+        const data = JSON.parse(event.data)
 
-        switch (message.type) {
+        switch (data.type) {
           case 'screenshot':
-            setScreenshots((prev) => [message, ...prev].slice(0, 100))
-            break
-
-          case 'log':
-            setLogs((prev) => [message, ...prev].slice(0, 200))
+            setScreenshots((prev) => [data as ScreenshotMessage, ...prev].slice(0, 100))
             break
 
           case 'status':
-            setStatus(message.details)
-            setCurrentStatus(message.status)
+            setStatus((data as StatusMessage).details)
+            setCurrentStatus((data as StatusMessage).status)
             break
 
           case 'ai_message':
-            setAIMessages((prev) => [message, ...prev].slice(0, 100))
+            setAIMessages((prev) => [data as AIMessage, ...prev].slice(0, 100))
+            break
+
+          case 'raw_log':
+            setRawLogs((prev) => [...prev, data as RawLogMessage].slice(-500))
+            break
+
+          case 'logs.history':
+            setRawLogs(data.logs || [])
             break
         }
       } catch (e) {
@@ -162,6 +168,14 @@ export function useWebSocket(): UseWebSocketResult {
     }
   }, [])
 
+  const subscribeRawLogs = useCallback(() => {
+    sendCommand('logs.subscribe')
+  }, [sendCommand])
+
+  const unsubscribeRawLogs = useCallback(() => {
+    sendCommand('logs.unsubscribe')
+  }, [sendCommand])
+
   useEffect(() => {
     connect()
     return () => {
@@ -174,10 +188,12 @@ export function useWebSocket(): UseWebSocketResult {
     status,
     currentStatus,
     screenshots,
-    logs,
+    rawLogs,
     aiMessages,
     sendCommand,
     connect,
     disconnect,
+    subscribeRawLogs,
+    unsubscribeRawLogs,
   }
 }

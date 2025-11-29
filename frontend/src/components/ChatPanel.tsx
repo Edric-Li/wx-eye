@@ -1,8 +1,9 @@
-import React, { useMemo, useRef, useEffect } from 'react'
+import React, { useMemo, useRef, useEffect, useState } from 'react'
 import { AIMessage } from '../hooks/useWebSocket'
 
-interface AIMessagePanelProps {
+interface ChatPanelProps {
   aiMessages: AIMessage[]
+  selectedContact: string | null
 }
 
 interface ChatItem {
@@ -12,16 +13,23 @@ interface ChatItem {
   timestamp: string
 }
 
-export function AIMessagePanel({ aiMessages }: AIMessagePanelProps) {
+export function ChatPanel({ aiMessages, selectedContact }: ChatPanelProps) {
   const listRef = useRef<HTMLDivElement>(null)
+  const [message, setMessage] = useState('')
+  const [sending, setSending] = useState(false)
 
-  // 把所有消息合并成一个聊天记录列表，按时间顺序（旧的在上，新的在下）
+  // 过滤当前选中联系人的消息，并合并成聊天记录列表
   const allMessages = useMemo(() => {
     const messages: ChatItem[] = []
 
+    // 过滤当前联系人的消息
+    const filtered = selectedContact
+      ? aiMessages.filter((m) => m.contact === selectedContact)
+      : aiMessages
+
     // 倒序遍历（aiMessages 是新的在前），这样最终结果是旧的在上
-    for (let i = aiMessages.length - 1; i >= 0; i--) {
-      const msg = aiMessages[i]
+    for (let i = filtered.length - 1; i >= 0; i--) {
+      const msg = filtered[i]
       for (const chatMsg of msg.new_messages) {
         messages.push({
           sender: chatMsg.sender || '对方',
@@ -33,7 +41,7 @@ export function AIMessagePanel({ aiMessages }: AIMessagePanelProps) {
     }
 
     return messages
-  }, [aiMessages])
+  }, [aiMessages, selectedContact])
 
   // 新消息时自动滚动到底部
   useEffect(() => {
@@ -42,18 +50,57 @@ export function AIMessagePanel({ aiMessages }: AIMessagePanelProps) {
     }
   }, [allMessages.length])
 
+  const handleSend = async () => {
+    if (!message.trim() || !selectedContact) return
+
+    setSending(true)
+    try {
+      const params = new URLSearchParams({
+        text: message,
+        contact: selectedContact,
+      })
+      const res = await fetch(`/api/message/send?${params}`, {
+        method: 'POST',
+      })
+      const data = await res.json()
+      if (data.success) {
+        setMessage('')
+      }
+    } catch (err) {
+      console.error('发送失败:', err)
+    } finally {
+      setSending(false)
+    }
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      handleSend()
+    }
+  }
+
   return (
     <div style={styles.container}>
+      {/* Header */}
       <div style={styles.header}>
-        <h3 style={styles.title}>AI 消息识别</h3>
+        <h3 style={styles.title}>
+          {selectedContact ? selectedContact : '聊天记录'}
+        </h3>
         <span style={styles.count}>{allMessages.length}</span>
       </div>
 
+      {/* Chat messages */}
       <div style={styles.chatContainer} ref={listRef}>
-        {allMessages.length === 0 ? (
+        {!selectedContact ? (
           <div style={styles.placeholder}>
-            <div style={styles.placeholderIcon}>🤖</div>
-            <div>等待 AI 识别新消息...</div>
+            <div style={styles.placeholderIcon}>👈</div>
+            <div>请先选择一个联系人</div>
+          </div>
+        ) : allMessages.length === 0 ? (
+          <div style={styles.placeholder}>
+            <div style={styles.placeholderIcon}>💬</div>
+            <div>等待消息...</div>
           </div>
         ) : (
           allMessages.map((msg, index) => {
@@ -76,11 +123,37 @@ export function AIMessagePanel({ aiMessages }: AIMessagePanelProps) {
                   {!isMe && <div style={styles.senderName}>{msg.sender}</div>}
                   <div style={styles.content}>{msg.content}</div>
                 </div>
-                {isMe && <div style={{...styles.avatar, ...styles.myAvatar}}>我</div>}
+                {isMe && <div style={{ ...styles.avatar, ...styles.myAvatar }}>我</div>}
               </div>
             )
           })
         )}
+      </div>
+
+      {/* Input area */}
+      <div style={styles.inputArea}>
+        <textarea
+          placeholder={selectedContact ? '输入消息...' : '请先选择联系人'}
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          onKeyDown={handleKeyDown}
+          disabled={!selectedContact || sending}
+          style={{
+            ...styles.input,
+            opacity: !selectedContact ? 0.5 : 1,
+          }}
+          rows={2}
+        />
+        <button
+          onClick={handleSend}
+          disabled={!selectedContact || !message.trim() || sending}
+          style={{
+            ...styles.sendButton,
+            opacity: !selectedContact || !message.trim() || sending ? 0.5 : 1,
+          }}
+        >
+          {sending ? '...' : '发送'}
+        </button>
       </div>
     </div>
   )
@@ -91,6 +164,9 @@ const styles: { [key: string]: React.CSSProperties } = {
     display: 'flex',
     flexDirection: 'column',
     height: '100%',
+    backgroundColor: '#16213e',
+    borderRadius: '8px',
+    overflow: 'hidden',
   },
   header: {
     display: 'flex',
@@ -118,6 +194,7 @@ const styles: { [key: string]: React.CSSProperties } = {
     display: 'flex',
     flexDirection: 'column',
     gap: '8px',
+    backgroundColor: '#ebebeb',
   },
   placeholder: {
     flex: 1,
@@ -137,14 +214,14 @@ const styles: { [key: string]: React.CSSProperties } = {
     gap: '8px',
   },
   avatar: {
-    width: '32px',
-    height: '32px',
+    width: '36px',
+    height: '36px',
     borderRadius: '4px',
     backgroundColor: '#1a4b8c',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    fontSize: '12px',
+    fontSize: '14px',
     fontWeight: 600,
     color: '#fff',
     flexShrink: 0,
@@ -154,7 +231,7 @@ const styles: { [key: string]: React.CSSProperties } = {
   },
   bubble: {
     maxWidth: '70%',
-    padding: '8px 12px',
+    padding: '10px 12px',
     borderRadius: '4px',
     wordBreak: 'break-word',
   },
@@ -176,5 +253,34 @@ const styles: { [key: string]: React.CSSProperties } = {
   content: {
     fontSize: '14px',
     lineHeight: 1.4,
+  },
+  inputArea: {
+    display: 'flex',
+    gap: '8px',
+    padding: '12px',
+    borderTop: '1px solid #0f3460',
+    backgroundColor: '#16213e',
+  },
+  input: {
+    flex: 1,
+    padding: '10px',
+    fontSize: '14px',
+    backgroundColor: '#0f3460',
+    border: '1px solid #1a4b8c',
+    borderRadius: '4px',
+    color: '#fff',
+    resize: 'none',
+    fontFamily: 'inherit',
+  },
+  sendButton: {
+    padding: '10px 20px',
+    fontSize: '14px',
+    fontWeight: 600,
+    backgroundColor: '#07c160',
+    color: '#fff',
+    border: 'none',
+    borderRadius: '4px',
+    cursor: 'pointer',
+    alignSelf: 'flex-end',
   },
 }

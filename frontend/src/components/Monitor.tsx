@@ -1,41 +1,43 @@
 import React, { useState, useMemo } from 'react'
 import { useWebSocket, ScreenshotMessage, ContactStatus } from '../hooks/useWebSocket'
 import { ImageViewer } from './ImageViewer'
-import { LogPanel } from './LogPanel'
-import { AIMessagePanel } from './AIMessagePanel'
-import { SendMessagePanel } from './SendMessagePanel'
+import { ChatPanel } from './ChatPanel'
+import { LogModal } from './LogModal'
+import { WindowDiscoverModal } from './WindowDiscoverModal'
 
 export function Monitor() {
-  const { isConnected, status, currentStatus, screenshots, logs, aiMessages, sendCommand } = useWebSocket()
+  const {
+    isConnected,
+    status,
+    currentStatus,
+    screenshots,
+    rawLogs,
+    aiMessages,
+    sendCommand,
+    subscribeRawLogs,
+    unsubscribeRawLogs,
+  } = useWebSocket()
   const [newContact, setNewContact] = useState('')
-  const [interval, setInterval] = useState(0.1)
   const [selectedImage, setSelectedImage] = useState<ScreenshotMessage | null>(null)
-  const [filterContact, setFilterContact] = useState<string | null>(null)
+  const [selectedContact, setSelectedContact] = useState<string | null>(null)
+  const [showLogModal, setShowLogModal] = useState(false)
+  const [showWindowModal, setShowWindowModal] = useState(false)
 
   const isRunning =
     currentStatus === 'running' || currentStatus === 'paused' || currentStatus === 'starting'
   const isPaused = currentStatus === 'paused'
   const contacts = status.contacts || []
 
-  // 按联系人过滤截图
+  // 过滤当前选中联系人的截图
   const filteredScreenshots = useMemo(() => {
-    if (!filterContact) return screenshots
-    return screenshots.filter((s) => s.compare_result.contact === filterContact)
-  }, [screenshots, filterContact])
-
-  // 按联系人分组截图
-  const screenshotsByContact = useMemo(() => {
-    const grouped: Record<string, ScreenshotMessage[]> = {}
-    screenshots.forEach((s) => {
-      const contact = s.compare_result.contact || 'unknown'
-      if (!grouped[contact]) grouped[contact] = []
-      grouped[contact].push(s)
-    })
-    return grouped
-  }, [screenshots])
+    if (!selectedContact) return screenshots.slice(0, 20)
+    return screenshots
+      .filter((s) => s.compare_result.contact === selectedContact)
+      .slice(0, 20)
+  }, [screenshots, selectedContact])
 
   const handleStart = () => {
-    sendCommand('start', { interval })
+    sendCommand('start')
   }
 
   const handleStop = () => {
@@ -55,10 +57,17 @@ export function Monitor() {
 
   const handleRemoveContact = (name: string) => {
     sendCommand('remove_contact', { name })
+    if (selectedContact === name) {
+      setSelectedContact(null)
+    }
   }
 
-  const handleListWindows = () => {
-    sendCommand('list_wechat_windows')
+  const handleSelectContact = (name: string) => {
+    setSelectedContact(selectedContact === name ? null : name)
+  }
+
+  const handleAddContactFromWindow = (name: string) => {
+    sendCommand('add_contact', { name })
   }
 
   return (
@@ -66,14 +75,22 @@ export function Monitor() {
       {/* Header */}
       <header style={styles.header}>
         <h1 style={styles.title}>WxEye - WeChat Monitor</h1>
-        <div style={styles.connectionStatus}>
-          <span
-            style={{
-              ...styles.statusDot,
-              backgroundColor: isConnected ? '#4caf50' : '#f44336',
-            }}
-          />
-          {isConnected ? '已连接' : '未连接'}
+        <div style={styles.headerRight}>
+          <button onClick={() => setShowWindowModal(true)} style={styles.headerButton}>
+            发现窗口
+          </button>
+          <button onClick={() => setShowLogModal(true)} style={styles.headerButton}>
+            日志
+          </button>
+          <div style={styles.connectionStatus}>
+            <span
+              style={{
+                ...styles.statusDot,
+                backgroundColor: isConnected ? '#4caf50' : '#f44336',
+              }}
+            />
+            {isConnected ? '已连接' : '未连接'}
+          </div>
         </div>
       </header>
 
@@ -81,9 +98,6 @@ export function Monitor() {
       <div style={styles.contactSection}>
         <div style={styles.contactHeader}>
           <h3 style={styles.contactTitle}>监控联系人 ({contacts.length})</h3>
-          <button onClick={handleListWindows} style={styles.discoverButton}>
-            发现窗口
-          </button>
         </div>
 
         <div style={styles.addContactRow}>
@@ -105,7 +119,14 @@ export function Monitor() {
             <div style={styles.noContacts}>请先添加要监控的联系人（微信独立聊天窗口的标题）</div>
           ) : (
             contacts.map((contact: ContactStatus) => (
-              <div key={contact.name} style={styles.contactItem}>
+              <div
+                key={contact.name}
+                style={{
+                  ...styles.contactItem,
+                  ...(selectedContact === contact.name ? styles.contactItemSelected : {}),
+                }}
+                onClick={() => handleSelectContact(contact.name)}
+              >
                 <div style={styles.contactInfo}>
                   <span
                     style={{
@@ -119,7 +140,10 @@ export function Monitor() {
                   </span>
                 </div>
                 <button
-                  onClick={() => handleRemoveContact(contact.name)}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    handleRemoveContact(contact.name)
+                  }}
                   style={styles.removeButton}
                 >
                   ×
@@ -132,20 +156,6 @@ export function Monitor() {
 
       {/* Controls */}
       <div style={styles.controls}>
-        <div style={styles.inputGroup}>
-          <label style={styles.label}>截图间隔 (秒):</label>
-          <input
-            type="number"
-            value={interval}
-            onChange={(e) => setInterval(parseFloat(e.target.value))}
-            disabled={isRunning}
-            min={0.05}
-            max={5}
-            step={0.05}
-            style={styles.input}
-          />
-        </div>
-
         <div style={styles.buttonGroup}>
           {!isRunning ? (
             <button
@@ -180,41 +190,22 @@ export function Monitor() {
         </div>
       </div>
 
-      {/* Filter tabs */}
-      {screenshots.length > 0 && (
-        <div style={styles.filterTabs}>
-          <button
-            onClick={() => setFilterContact(null)}
-            style={{
-              ...styles.filterTab,
-              ...(filterContact === null ? styles.filterTabActive : {}),
-            }}
-          >
-            全部 ({screenshots.length})
-          </button>
-          {Object.entries(screenshotsByContact).map(([contact, shots]) => (
-            <button
-              key={contact}
-              onClick={() => setFilterContact(contact)}
-              style={{
-                ...styles.filterTab,
-                ...(filterContact === contact ? styles.filterTabActive : {}),
-              }}
-            >
-              {contact} ({shots.length})
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Main Content */}
+      {/* Main Content: Chat + Screenshot */}
       <div style={styles.mainContent}>
-        {/* Screenshots Grid */}
-        <div style={styles.screenshotsSection}>
-          <h2 style={styles.sectionTitle}>
-            截图 {filterContact ? `- ${filterContact}` : ''} ({filteredScreenshots.length})
-          </h2>
-          <div style={styles.screenshotsGrid}>
+        {/* Left: Chat Panel */}
+        <div style={styles.chatSection}>
+          <ChatPanel aiMessages={aiMessages} selectedContact={selectedContact} />
+        </div>
+
+        {/* Right: Screenshot Panel */}
+        <div style={styles.screenshotSection}>
+          <div style={styles.screenshotHeader}>
+            <h3 style={styles.sectionTitle}>
+              截图 {selectedContact ? `- ${selectedContact}` : ''}
+            </h3>
+            <span style={styles.screenshotCount}>{filteredScreenshots.length}</span>
+          </div>
+          <div style={styles.screenshotList}>
             {filteredScreenshots.length === 0 ? (
               <div style={styles.placeholder}>暂无截图</div>
             ) : (
@@ -224,9 +215,6 @@ export function Monitor() {
                   style={styles.screenshotItem}
                   onClick={() => setSelectedImage(screenshot)}
                 >
-                  <div style={styles.contactBadge}>
-                    {screenshot.compare_result.contact || 'unknown'}
-                  </div>
                   <img
                     src={screenshot.image_data}
                     alt={`Screenshot ${index + 1}`}
@@ -236,31 +224,10 @@ export function Monitor() {
                     <span style={styles.screenshotTime}>
                       {new Date(screenshot.timestamp).toLocaleTimeString()}
                     </span>
-                    <span style={styles.screenshotDesc}>
-                      {screenshot.compare_result.description}
-                    </span>
                   </div>
                 </div>
               ))
             )}
-          </div>
-        </div>
-
-        {/* AI Message Panel */}
-        <div style={styles.aiSection}>
-          <AIMessagePanel aiMessages={aiMessages} />
-        </div>
-
-        {/* Right Sidebar */}
-        <div style={styles.rightSidebar}>
-          {/* Send Message Panel */}
-          <div style={styles.sendSection}>
-            <SendMessagePanel contacts={contacts.map((c: ContactStatus) => c.name)} />
-          </div>
-
-          {/* Log Panel */}
-          <div style={styles.logSection}>
-            <LogPanel logs={logs} />
           </div>
         </div>
       </div>
@@ -269,6 +236,22 @@ export function Monitor() {
       {selectedImage && (
         <ImageViewer image={selectedImage} onClose={() => setSelectedImage(null)} />
       )}
+
+      {/* Log Modal */}
+      <LogModal
+        isOpen={showLogModal}
+        onClose={() => setShowLogModal(false)}
+        logs={rawLogs}
+        onSubscribe={subscribeRawLogs}
+        onUnsubscribe={unsubscribeRawLogs}
+      />
+
+      {/* Window Discover Modal */}
+      <WindowDiscoverModal
+        isOpen={showWindowModal}
+        onClose={() => setShowWindowModal(false)}
+        onAddContact={handleAddContactFromWindow}
+      />
     </div>
   )
 }
@@ -279,6 +262,8 @@ const styles: { [key: string]: React.CSSProperties } = {
     backgroundColor: '#1a1a2e',
     color: '#eee',
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    display: 'flex',
+    flexDirection: 'column',
   },
   header: {
     display: 'flex',
@@ -292,6 +277,20 @@ const styles: { [key: string]: React.CSSProperties } = {
     margin: 0,
     fontSize: '22px',
     fontWeight: 600,
+  },
+  headerRight: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+  },
+  headerButton: {
+    padding: '8px 16px',
+    fontSize: '13px',
+    backgroundColor: '#0f3460',
+    color: '#aaa',
+    border: '1px solid #1a4b8c',
+    borderRadius: '4px',
+    cursor: 'pointer',
   },
   connectionStatus: {
     display: 'flex',
@@ -319,15 +318,6 @@ const styles: { [key: string]: React.CSSProperties } = {
     margin: 0,
     fontSize: '16px',
     fontWeight: 600,
-  },
-  discoverButton: {
-    padding: '6px 12px',
-    fontSize: '12px',
-    backgroundColor: '#0f3460',
-    color: '#aaa',
-    border: '1px solid #1a4b8c',
-    borderRadius: '4px',
-    cursor: 'pointer',
   },
   addContactRow: {
     display: 'flex',
@@ -370,6 +360,13 @@ const styles: { [key: string]: React.CSSProperties } = {
     padding: '6px 12px',
     backgroundColor: '#0f3460',
     borderRadius: '16px',
+    cursor: 'pointer',
+    border: '2px solid transparent',
+    transition: 'border-color 0.2s',
+  },
+  contactItemSelected: {
+    borderColor: '#4caf50',
+    backgroundColor: '#1a4b8c',
   },
   contactInfo: {
     display: 'flex',
@@ -404,24 +401,6 @@ const styles: { [key: string]: React.CSSProperties } = {
     padding: '12px 24px',
     backgroundColor: '#0f3460',
     flexWrap: 'wrap',
-  },
-  inputGroup: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-  },
-  label: {
-    fontSize: '14px',
-    color: '#aaa',
-  },
-  input: {
-    padding: '8px 12px',
-    fontSize: '14px',
-    backgroundColor: '#16213e',
-    border: '1px solid #1a4b8c',
-    borderRadius: '4px',
-    color: '#fff',
-    width: '80px',
   },
   buttonGroup: {
     display: 'flex',
@@ -473,120 +452,76 @@ const styles: { [key: string]: React.CSSProperties } = {
     fontSize: '14px',
     color: '#aaa',
   },
-  filterTabs: {
-    display: 'flex',
-    gap: '4px',
-    padding: '8px 24px',
-    backgroundColor: '#16213e',
-    borderBottom: '1px solid #0f3460',
-    overflowX: 'auto',
-  },
-  filterTab: {
-    padding: '6px 16px',
-    fontSize: '13px',
-    backgroundColor: '#0f3460',
-    color: '#aaa',
-    border: 'none',
-    borderRadius: '4px',
-    cursor: 'pointer',
-    whiteSpace: 'nowrap',
-  },
-  filterTabActive: {
-    backgroundColor: '#1a4b8c',
-    color: '#fff',
-  },
   mainContent: {
-    display: 'grid',
-    gridTemplateColumns: '1fr 400px 320px',
+    display: 'flex',
+    flex: 1,
     gap: '16px',
     padding: '16px 24px',
-    minHeight: 'calc(100vh - 280px)',
+    minHeight: 0,
   },
-  rightSidebar: {
+  chatSection: {
+    flex: 1,
+    minWidth: 0,
     display: 'flex',
     flexDirection: 'column',
-    gap: '16px',
   },
-  sendSection: {
+  screenshotSection: {
+    width: '300px',
+    flexShrink: 0,
     backgroundColor: '#16213e',
     borderRadius: '8px',
+    display: 'flex',
+    flexDirection: 'column',
     overflow: 'hidden',
   },
-  screenshotsSection: {
-    backgroundColor: '#16213e',
-    borderRadius: '8px',
-    padding: '16px',
-    overflow: 'hidden',
+  screenshotHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: '12px 16px',
+    borderBottom: '1px solid #0f3460',
   },
   sectionTitle: {
-    margin: '0 0 16px 0',
-    fontSize: '18px',
+    margin: 0,
+    fontSize: '14px',
     fontWeight: 600,
   },
-  screenshotsGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
-    gap: '12px',
-    maxHeight: 'calc(100vh - 380px)',
+  screenshotCount: {
+    backgroundColor: '#0f3460',
+    padding: '2px 10px',
+    borderRadius: '10px',
+    fontSize: '12px',
+  },
+  screenshotList: {
+    flex: 1,
     overflowY: 'auto',
+    padding: '8px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
   },
   placeholder: {
-    gridColumn: '1 / -1',
     textAlign: 'center',
-    padding: '48px',
+    padding: '24px',
     color: '#666',
   },
   screenshotItem: {
     backgroundColor: '#0f3460',
-    borderRadius: '8px',
+    borderRadius: '4px',
     overflow: 'hidden',
     cursor: 'pointer',
     transition: 'transform 0.2s',
-    position: 'relative',
-  },
-  contactBadge: {
-    position: 'absolute',
-    top: '8px',
-    left: '8px',
-    padding: '2px 8px',
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    borderRadius: '4px',
-    fontSize: '11px',
-    color: '#fff',
-    zIndex: 1,
   },
   thumbnail: {
     width: '100%',
-    height: '120px',
+    height: '160px',
     objectFit: 'cover',
   },
   screenshotInfo: {
-    padding: '8px',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '4px',
+    padding: '6px 8px',
   },
   screenshotTime: {
     fontSize: '11px',
     color: '#888',
-  },
-  screenshotDesc: {
-    fontSize: '11px',
-    color: '#aaa',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
-  },
-  aiSection: {
-    backgroundColor: '#16213e',
-    borderRadius: '8px',
-    overflow: 'hidden',
-  },
-  logSection: {
-    backgroundColor: '#16213e',
-    borderRadius: '8px',
-    overflow: 'hidden',
-    flex: 1,
-    minHeight: '200px',
   },
 }
