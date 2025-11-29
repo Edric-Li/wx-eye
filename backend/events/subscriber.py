@@ -139,6 +139,7 @@ class SubscriberManager:
 
         # 复制订阅者列表以避免迭代时修改
         subscribers_copy = list(self._subscribers.items())
+        sent_count = 0
 
         for websocket, subscriber in subscribers_copy:
             # 检查是否订阅了该事件
@@ -147,9 +148,13 @@ class SubscriberManager:
 
             try:
                 await websocket.send_text(data)
+                sent_count += 1
             except Exception as e:
                 logger.debug(f"Failed to send to subscriber: {e}")
                 disconnected.append(websocket)
+
+        if sent_count > 0:
+            logger.debug(f"Broadcast event [{event.type}] to {sent_count} subscriber(s)")
 
         # 清理断开的连接
         if disconnected:
@@ -167,12 +172,18 @@ class SubscriberManager:
 
         data = json.dumps(message, ensure_ascii=False)
         disconnected: list[WebSocket] = []
+        sent_count = 0
+        msg_type = message.get("type", "unknown")
 
         for websocket in list(self._subscribers.keys()):
             try:
                 await websocket.send_text(data)
+                sent_count += 1
             except Exception:
                 disconnected.append(websocket)
+
+        if sent_count > 0:
+            logger.debug(f"Broadcast raw [{msg_type}] to {sent_count} subscriber(s)")
 
         if disconnected:
             async with self._lock:

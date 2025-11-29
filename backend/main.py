@@ -360,16 +360,14 @@ class MultiContactCaptureEngine:
 
                             # 像素级比对检测到变化后，提交给 AI 处理器分析消息内容
                             if self._ai_processor:
+                                await self._ai_processor.submit(
+                                    contact_name, img, filename=filename
+                                )
                                 if is_first:
-                                    # 首次截图作为基准，跳过 AI 分析
-                                    # 下次变化时的 AI 分析结果会作为基线记录（不广播）
                                     logger.info(
-                                        f"[{contact_name}] 首次截图，作为基准跳过 AI 分析"
+                                        f"[{contact_name}] 首次截图，提交给 AI 分析"
                                     )
                                 else:
-                                    await self._ai_processor.submit(
-                                        contact_name, img, filename=filename
-                                    )
                                     logger.debug(
                                         f"[{contact_name}] 像素变化检测通过，提交给 AI 分析: {result.description}"
                                     )
@@ -594,6 +592,9 @@ async def lifespan(app: FastAPI):
         handlers=[handler],
         force=True,
     )
+
+    # 抑制 websockets 库在连接断开时的错误日志（WinError 121 信号灯超时）
+    logging.getLogger("websockets").setLevel(logging.CRITICAL)
 
     # 添加原始日志收集器到根日志器
     raw_log_collector.setFormatter(logging.Formatter(log_format))

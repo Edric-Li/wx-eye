@@ -40,17 +40,6 @@ class ClaudeAnalyzer:
     支持串行处理以避免并发问题和 API 限流。
     """
 
-    # 支持的模型
-    MODELS = {
-        "haiku": "claude-haiku-4-5-20251001",    # 最快最便宜（Haiku 4.5）
-        "sonnet": "claude-sonnet-4-5-20250929",  # 平衡（Sonnet 4.5）
-        "opus": "claude-3-opus-20240229",        # 最强
-    }
-
-    # 压缩参数
-    JPEG_QUALITY = 70   # JPEG 质量 (1-100)，越低体积越小
-
-
     def __init__(
         self,
         api_key: str,
@@ -76,7 +65,7 @@ class ClaudeAnalyzer:
             client_kwargs["base_url"] = base_url
 
         self.client = anthropic.Anthropic(**client_kwargs)
-        self.model = self.MODELS.get(model, model)
+        self.model = model
         self.max_retries = max_retries
         self.timeout = timeout
         self.base_url = base_url
@@ -99,37 +88,29 @@ class ClaudeAnalyzer:
         Returns:
             (base64_string, media_type)
         """
-        img = image
-
-        # 转换为 RGB（JPEG 不支持 RGBA）
-        if img.mode == 'RGBA':
-            img = img.convert('RGB')
-
         buffer = BytesIO()
-        img.save(buffer, format="JPEG", quality=self.JPEG_QUALITY)
+        image.save(buffer, format="PNG")
         base64_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
-        return base64_str, "image/jpeg"
+        return base64_str, "image/png"
 
     def _build_prompt(
         self,
         previous_messages: list[str] | None = None,
     ) -> str:
         """构建分析提示词"""
-        return """分析这张微信聊天截图，提取所有可见的消息。
+        return """提取微信聊天截图中的消息。返回JSON数组。
 
-返回JSON二维数组：[["发送者", "消息内容"], ...]
+规则：
+1. 绿色气泡 → 发送者="$self"
+2. 白色气泡 → 发送者=气泡上方的昵称文字
+3. 白色气泡如果看不到上方的昵称，跳过该消息不要提取
+4. 忽略灰色引用气泡
 
-发送者规则：
-- 右侧绿色气泡（自己发的）填 "$self"
-- 左侧白色气泡：群聊填消息上方的昵称，私聊填 "$other"
-- 如果左侧消息的昵称被截断或遮挡看不完整，跳过该消息不返回
-- 忽略灰色引用气泡和系统提示
-- 按时间顺序从上到下
+注意：截图顶部第一条消息如果昵称被截断不可见，必须跳过！不要猜测！
 
-示例：[["$self", "你好"], ["张三", "收到"], ["$other", "好的"]]
-
-如果无法识别内容返回：[]
-只返回JSON，不要解释"""
+格式：[["发送者", "消息内容"], ...]
+示例：[["无趣.", "99"], ["无趣.", "a"]]
+只返回JSON"""
 
     async def analyze(
         self,
@@ -237,6 +218,10 @@ class ClaudeAnalyzer:
                     "role": "user",
                     "content": [
                         {
+                            "type": "text",
+                            "text": prompt,
+                        },
+                        {
                             "type": "image",
                             "source": {
                                 "type": "base64",
@@ -244,17 +229,16 @@ class ClaudeAnalyzer:
                                 "data": base64_image,
                             },
                         },
-                        {
-                            "type": "text",
-                            "text": prompt,
-                        },
                     ],
                 }
             ],
         )
 
+        content = response.content[0].text
+        logger.info(f"[AI] 原始输出: {content}")
+
         return {
-            "content": response.content[0].text,
+            "content": content,
             "usage": {
                 "input_tokens": response.usage.input_tokens,
                 "output_tokens": response.usage.output_tokens,

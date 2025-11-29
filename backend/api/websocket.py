@@ -64,11 +64,9 @@ class ConnectionManager:
 
         兼容旧协议，同时发布事件。
         """
-        # 压缩图片用于传输
+        # 原图传输（PNG 无损）
         buffer = BytesIO()
-        thumbnail = image.copy()
-        thumbnail.thumbnail((800, 600), Image.Resampling.LANCZOS)
-        thumbnail.save(buffer, format="JPEG", quality=80)
+        image.save(buffer, format="PNG")
         image_base64 = base64.b64encode(buffer.getvalue()).decode()
 
         # 兼容旧协议的消息格式
@@ -77,7 +75,7 @@ class ConnectionManager:
             "timestamp": datetime.now().isoformat(),
             "filename": filename,
             "is_significant": is_significant,
-            "image_data": f"data:image/jpeg;base64,{image_base64}",
+            "image_data": f"data:image/png;base64,{image_base64}",
             "compare_result": compare_result,
         }
 

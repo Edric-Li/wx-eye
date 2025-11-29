@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     # ============ Claude AI 配置 ============
     anthropic_api_key: Optional[str] = None
     anthropic_base_url: Optional[str] = None  # 自定义 API 地址
-    claude_model: str = "sonnet"  # haiku / sonnet / opus
+    claude_model: str = "claude-sonnet-4-5-20250929"  # 直接配置模型 ID
 
     # ============ AI 处理配置 ============
     enable_ai: bool = True  # 是否启用 AI 分析

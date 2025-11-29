@@ -23,21 +23,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# 防止 pyautogui 移动过快
-pyautogui.PAUSE = 0.1
-
 # Windows DPI 感知设置
-# 解决 pygetwindow 与 pyautogui 坐标不一致问题
+# 必须在使用 pyautogui/pygetwindow 之前设置，确保坐标一致
 if platform.system() == "Windows":
     try:
         import ctypes
-        # 设置进程为 DPI 感知，确保坐标一致性
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
-    except Exception:
+        # PROCESS_PER_MONITOR_DPI_AWARE = 2
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        logger.info("已启用 Windows DPI 感知")
+    except Exception as e:
+        # 降级尝试旧版 API
         try:
             ctypes.windll.user32.SetProcessDPIAware()
+            logger.info("已启用 Windows DPI 感知 (降级)")
         except Exception:
-            pass
+            logger.warning(f"设置 DPI 感知失败: {e}")
+
+# 防止 pyautogui 移动过快
+pyautogui.PAUSE = 0.1
 
 # 输入框相对于窗口的位置偏移（微信聊天窗口）
 # 输入框在窗口底部，水平居中偏右
@@ -158,18 +161,27 @@ class MessageSender:
         try:
             x, y = pos
 
-            # 获取屏幕尺寸进行验证
+            # 获取屏幕尺寸进行边界检查
             screen_width, screen_height = pyautogui.size()
-            logger.info(f"屏幕尺寸: {screen_width}x{screen_height}, 点击坐标: ({x}, {y})")
+            logger.info(f"屏幕尺寸: {screen_width}x{screen_height}, 目标点击位置: ({x}, {y})")
 
-            # 验证坐标是否在屏幕范围内
-            if x < 0 or y < 0 or x >= screen_width or y >= screen_height:
-                logger.error(
-                    f"点击坐标超出屏幕范围: ({x}, {y}), "
-                    f"屏幕: {screen_width}x{screen_height}"
-                )
+            # 检查坐标是否在合理范围内
+            # 留出边距避免触发 fail-safe (屏幕角落 5 像素内会触发)
+            margin = 10
+            if x < margin or x > screen_width - margin:
+                logger.error(f"点击位置 x={x} 超出屏幕安全范围 [{margin}, {screen_width - margin}]")
+                return False
+            if y < margin or y > screen_height - margin:
+                logger.error(f"点击位置 y={y} 超出屏幕安全范围 [{margin}, {screen_height - margin}]")
                 return False
 
+            # 检查窗口坐标是否合理（可能是最小化或异常状态）
+            w = self._current_window
+            if w and (w.x < -1000 or w.y < -1000 or w.width <= 0 or w.height <= 0):
+                logger.error(f"窗口坐标异常: x={w.x}, y={w.y}, width={w.width}, height={w.height}")
+                return False
+
+            logger.debug(f"点击输入框: ({x}, {y})")
             pyautogui.click(x, y)
             time.sleep(0.1)  # 等待点击生效
             return True

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -453,7 +454,129 @@ class AIMessageProcessor:
                     logger.debug(f"锚点匹配: anchor_idx={anchor_idx}, pos={pos}")
                     return pos + 1
 
+        # 策略3：模糊后缀匹配（处理 AI 识别差异）
+        logger.info(f"精确匹配失败，启用模糊后缀匹配 (历史={len(history)}条, 当前={len(current)}条)")
+
+        max_fuzzy_suffix_len = min(len(history), len(current), 20)
+        for suffix_len in range(max_fuzzy_suffix_len, 0, -1):
+            suffix = history[-suffix_len:]
+            match_pos = self._find_fuzzy_sequence(current, suffix)
+            if match_pos >= 0:
+                logger.info(f"模糊后缀匹配成功: 匹配长度={suffix_len}, 位置={match_pos}")
+                return match_pos + suffix_len
+
+        # 策略4：反向单条匹配
+        logger.info(f"模糊后缀匹配失败，尝试反向单条匹配")
+        for i in range(len(current) - 1, -1, -1):
+            if self._is_similar_to_history(current[i], history):
+                logger.info(f"反向匹配成功: 匹配位置={i}")
+                return i + 1
+
+        # 完全无法匹配，返回 len(current) - 1，只取最后一条作为新消息
+        if current:
+            logger.warning(f"无法确定匹配位置，返回最后一条消息位置")
+            return len(current) - 1
+
         return None
+
+    def _is_similar_to_history(
+        self,
+        msg: tuple[str, str],
+        history: list[tuple[str, str]],
+    ) -> bool:
+        """检查消息是否与历史中的任何消息相似"""
+        for hist_msg in history:
+            if self._message_similar(msg, hist_msg):
+                return True
+        return False
+
+    def _find_fuzzy_sequence(
+        self,
+        messages: list[tuple[str, str]],
+        sequence: list[tuple[str, str]],
+    ) -> int:
+        """在消息列表中模糊查找连续序列的起始位置
+
+        Returns:
+            匹配的起始位置，未找到返回 -1
+        """
+        if not sequence or len(sequence) > len(messages):
+            return -1
+
+        seq_len = len(sequence)
+        for i in range(len(messages) - seq_len + 1):
+            if self._fuzzy_sequence_match(messages[i:i + seq_len], sequence):
+                return i
+        return -1
+
+    def _fuzzy_sequence_match(
+        self,
+        seq1: list[tuple[str, str]],
+        seq2: list[tuple[str, str]],
+    ) -> bool:
+        """检查两个序列是否模糊匹配"""
+        if len(seq1) != len(seq2):
+            return False
+
+        for msg1, msg2 in zip(seq1, seq2):
+            if not self._message_similar(msg1, msg2):
+                return False
+        return True
+
+    def _message_similar(
+        self,
+        msg1: tuple[str, str],
+        msg2: tuple[str, str],
+    ) -> bool:
+        """检查两条消息是否相似"""
+        sender1, content1 = msg1
+        sender2, content2 = msg2
+
+        # 发送者模糊比较
+        if self._normalize_sender(sender1) != self._normalize_sender(sender2):
+            return False
+
+        # 内容相似度检查
+        content1_normalized = self._normalize_content(content1)
+        content2_normalized = self._normalize_content(content2)
+        is_similar, _ = self._content_similar(content1_normalized, content2_normalized)
+        return is_similar
+
+    def _normalize_sender(self, sender: str) -> str:
+        """规范化发送者名称，用于模糊比较"""
+        # 移除标点符号（处理 "无趣." vs "无趣" 的差异）
+        normalized = re.sub(r'[^\w\s]', '', sender)
+        # 移除多余空白
+        normalized = ' '.join(normalized.split())
+        return normalized.lower()
+
+    def _normalize_content(self, content: str) -> str:
+        """规范化消息内容，用于相似度比较"""
+        # 移除数字（避免动态数据如"请求: 15,222"的干扰）
+        normalized = re.sub(r'\d+', '#', content)
+        # 移除多余空白
+        normalized = ' '.join(normalized.split())
+        return normalized
+
+    def _content_similar(self, a: str, b: str) -> tuple[bool, float]:
+        """检查两个规范化后的内容是否相似
+
+        Returns:
+            (是否相似, 相似度)
+        """
+        # 完全相同
+        if a == b:
+            return True, 1.0
+        # 长度差异过大，认为不同
+        if not a or not b:
+            return False, 0.0
+        len_diff_ratio = abs(len(a) - len(b)) / max(len(a), len(b))
+        if len_diff_ratio > 0.3:
+            return False, 0.0
+        # 简单相似度：共同字符比例
+        common = sum(1 for c in a if c in b)
+        similarity = common / max(len(a), len(b))
+        return similarity > 0.7, similarity  # 70% 相似度阈值
 
     def _find_sequence(
         self,
