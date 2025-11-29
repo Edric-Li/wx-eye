@@ -25,16 +25,34 @@ class ScreenshotService:
     """截图服务"""
 
     # 裁剪参数：只保留聊天区域，去掉标题栏、输入框和滚动条
-    CROP_TOP = 200      # 顶部裁掉的像素（标题栏）
-    CROP_BOTTOM = 300   # 底部裁掉的像素（输入框）
-    CROP_LEFT = 40      # 左侧裁掉的像素
-    CROP_RIGHT = 40     # 右侧裁掉的像素（滚动条）
+    # macOS 和 Windows 使用不同的参数（Windows DPI 缩放会影响像素值）
+    CROP_PARAMS = {
+        "darwin": {  # macOS
+            "top": 200,
+            "bottom": 300,
+            "left": 40,
+            "right": 40,
+        },
+        "win32": {  # Windows（按 100% 缩放基准，会根据 DPI 动态调整）
+            "top": 90,
+            "bottom": 210,
+            "left": 30,
+            "right": 30,
+        },
+    }
+
+    # 兼容旧代码的类属性（使用 macOS 的值作为默认）
+    CROP_TOP = 200
+    CROP_BOTTOM = 300
+    CROP_LEFT = 40
+    CROP_RIGHT = 40
 
     def __init__(self, save_dir: str = "static/screenshots") -> None:
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self._sct: mss.mss | None = None
         self.platform = sys.platform
+        self._dpi_scale: float | None = None  # 缓存 DPI 缩放比例
 
     @property
     def sct(self) -> mss.mss:
@@ -49,6 +67,34 @@ class ScreenshotService:
         sct_img = self.sct.grab(monitor)
         return Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
 
+    def _get_dpi_scale(self) -> float:
+        """获取 Windows DPI 缩放比例（结果会被缓存）"""
+        if self.platform != "win32":
+            return 1.0
+
+        # 使用缓存值避免重复调用
+        if self._dpi_scale is not None:
+            return self._dpi_scale
+
+        try:
+            import ctypes
+            # 设置 DPI 感知（只需调用一次，重复调用会被忽略）
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+            except OSError:
+                pass  # 已经设置过，忽略错误
+
+            # 获取主显示器的 DPI
+            hdc = ctypes.windll.user32.GetDC(0)
+            dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX
+            ctypes.windll.user32.ReleaseDC(0, hdc)
+            self._dpi_scale = dpi / 96.0  # 96 是 Windows 的基准 DPI
+            return self._dpi_scale
+        except Exception as e:
+            logger.warning(f"获取 DPI 失败: {e}, 使用默认值 1.0")
+            self._dpi_scale = 1.0
+            return 1.0
+
     def _crop_chat_area(self, image: Image.Image) -> Image.Image:
         """裁剪出聊天区域，去掉标题栏、输入框和滚动条
 
@@ -60,11 +106,26 @@ class ScreenshotService:
         """
         width, height = image.size
 
+        # 获取平台对应的裁剪参数
+        params = self.CROP_PARAMS.get(self.platform, self.CROP_PARAMS["darwin"])
+
+        # Windows 需要根据 DPI 缩放调整裁剪参数
+        dpi_scale = self._get_dpi_scale() if self.platform == "win32" else 1.0
+
+        crop_top = int(params["top"] * dpi_scale)
+        crop_bottom = int(params["bottom"] * dpi_scale)
+        crop_left = int(params["left"] * dpi_scale)
+        crop_right = int(params["right"] * dpi_scale)
+
         # 计算裁剪区域
-        left = self.CROP_LEFT
-        top = self.CROP_TOP
-        right = width - self.CROP_RIGHT
-        bottom = height - self.CROP_BOTTOM
+        left = crop_left
+        top = crop_top
+        right = width - crop_right
+        bottom = height - crop_bottom
+
+        logger.debug(f"裁剪参数: platform={self.platform}, dpi_scale={dpi_scale}, "
+                     f"crop=({crop_left},{crop_top},{crop_right},{crop_bottom}), "
+                     f"image={width}x{height}, result=({left},{top})->({right},{bottom})")
 
         # 确保裁剪区域有效
         if bottom <= top or right <= left:
@@ -158,6 +219,7 @@ class ScreenshotService:
     def _capture_window_windows(self, window: WindowInfo) -> Image.Image:
         """Windows: 使用 PrintWindow API 截取窗口内容（即使最小化/被遮挡）"""
         try:
+            import ctypes
             import win32con
             import win32gui
             import win32ui
@@ -206,7 +268,7 @@ class ScreenshotService:
             # 使用 PrintWindow 截取窗口内容
             # PW_RENDERFULLCONTENT (2) 支持 DWM 合成的窗口
             PW_RENDERFULLCONTENT = 2
-            result = win32gui.PrintWindow(hwnd, save_dc.GetSafeHdc(), PW_RENDERFULLCONTENT)
+            result = ctypes.windll.user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), PW_RENDERFULLCONTENT)
 
             if result == 0:
                 # PrintWindow 失败，尝试使用 BitBlt
