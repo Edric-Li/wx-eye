@@ -1,20 +1,21 @@
 """
 WebSocket 管理模块
-用于实时推送截图、日志和 AI 分析结果到前端
+重构为事件驱动架构，支持订阅/过滤
+
+兼容旧协议的同时，支持新的事件订阅模式。
 """
 
 from __future__ import annotations
 
-import asyncio
 import base64
-import json
 import logging
 from datetime import datetime
 from io import BytesIO
 from typing import Any, TYPE_CHECKING
 
-from fastapi import WebSocket
 from PIL import Image
+
+from events import Event, get_event_bus, get_subscriber_manager
 
 if TYPE_CHECKING:
     from ai.processor import ProcessingResult
@@ -25,44 +26,32 @@ logger = logging.getLogger(__name__)
 class ConnectionManager:
     """WebSocket 连接管理器
 
-    管理多个 WebSocket 客户端连接，支持广播消息到所有连接。
+    封装 SubscriberManager，提供兼容旧协议的接口。
+    所有事件发送都通过 EventBus 进行。
     """
 
     def __init__(self) -> None:
-        self.active_connections: set[WebSocket] = set()
-        self._lock = asyncio.Lock()
+        self._subscriber_manager = get_subscriber_manager()
+        self._event_bus = get_event_bus()
 
-    async def connect(self, websocket: WebSocket) -> None:
+    @property
+    def active_connections(self) -> int:
+        """活跃连接数"""
+        return self._subscriber_manager.subscriber_count
+
+    async def connect(self, websocket) -> None:
         """接受新的 WebSocket 连接"""
-        await websocket.accept()
-        async with self._lock:
-            self.active_connections.add(websocket)
-        logger.info(f"Client connected. Total: {len(self.active_connections)}")
+        await self._subscriber_manager.connect(websocket)
 
-    async def disconnect(self, websocket: WebSocket) -> None:
+    async def disconnect(self, websocket) -> None:
         """断开连接"""
-        async with self._lock:
-            self.active_connections.discard(websocket)
-        logger.info(f"Client disconnected. Total: {len(self.active_connections)}")
+        await self._subscriber_manager.disconnect(websocket)
 
     async def broadcast(self, message: dict[str, Any]) -> None:
-        """广播消息给所有连接的客户端"""
-        if not self.active_connections:
-            return
+        """广播原始消息（兼容旧协议）"""
+        await self._subscriber_manager.broadcast_raw(message)
 
-        data = json.dumps(message, ensure_ascii=False)
-        disconnected: set[WebSocket] = set()
-
-        for connection in self.active_connections.copy():
-            try:
-                await connection.send_text(data)
-            except Exception:
-                disconnected.add(connection)
-
-        # 清理断开的连接
-        if disconnected:
-            async with self._lock:
-                self.active_connections -= disconnected
+    # ============ 事件发送方法 ============
 
     async def send_screenshot(
         self,
@@ -71,22 +60,18 @@ class ConnectionManager:
         is_significant: bool,
         compare_result: dict[str, Any] | None = None,
     ) -> None:
-        """发送截图更新到所有客户端
+        """发送截图更新
 
-        Args:
-            image: PIL 图片对象
-            filename: 保存的文件名
-            is_significant: 是否是有意义的变化
-            compare_result: 对比结果详情
+        兼容旧协议，同时发布事件。
         """
         # 压缩图片用于传输
         buffer = BytesIO()
-        # 缩小图片以减少传输量
         thumbnail = image.copy()
         thumbnail.thumbnail((800, 600), Image.Resampling.LANCZOS)
         thumbnail.save(buffer, format="JPEG", quality=80)
         image_base64 = base64.b64encode(buffer.getvalue()).decode()
 
+        # 兼容旧协议的消息格式
         message = {
             "type": "screenshot",
             "timestamp": datetime.now().isoformat(),
@@ -98,30 +83,27 @@ class ConnectionManager:
 
         await self.broadcast(message)
 
-    async def send_log(self, level: str, message: str, extra: dict[str, Any] | None = None) -> None:
-        """发送日志到所有客户端
+    async def send_log(
+        self,
+        level: str,
+        message: str,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """发送日志
 
-        Args:
-            level: 日志级别 (info, warning, error)
-            message: 日志消息
-            extra: 额外信息
+        通过 EventBus 发布日志事件。
         """
-        log_message = {
-            "type": "log",
-            "timestamp": datetime.now().isoformat(),
-            "level": level,
-            "message": message,
-            "extra": extra or {},
-        }
+        event = Event.log(level=level, message=message, extra=extra)
+        await self._event_bus.emit(event)
 
-        await self.broadcast(log_message)
+    async def send_status(
+        self,
+        status: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """发送状态更新
 
-    async def send_status(self, status: str, details: dict[str, Any] | None = None) -> None:
-        """发送状态更新到所有客户端
-
-        Args:
-            status: 状态名称
-            details: 状态详情
+        兼容旧协议格式。
         """
         status_message = {
             "type": "status",
@@ -139,14 +121,11 @@ class ConnectionManager:
         summary: str = "",
         processing_stats: dict[str, Any] | None = None,
     ) -> None:
-        """发送 AI 分析的新消息到所有客户端
+        """发送 AI 分析的新消息
 
-        Args:
-            contact: 联系人名称
-            new_messages: 新消息列表 [{"sender": str, "content": str, "time": str}, ...]
-            summary: 消息摘要
-            processing_stats: 处理统计信息
+        同时发布 message.received 事件。
         """
+        # 兼容旧协议
         message = {
             "type": "ai_message",
             "timestamp": datetime.now().isoformat(),
@@ -156,30 +135,29 @@ class ConnectionManager:
             "message_count": len(new_messages),
             "processing_stats": processing_stats or {},
         }
-
         await self.broadcast(message)
 
-        # 同时发送日志
+        # 发布新事件
         if new_messages:
-            await self.send_log(
-                "info",
-                f"[{contact}] AI 识别到 {len(new_messages)} 条新消息: {summary}",
-                {"contact": contact, "message_count": len(new_messages)},
+            event = Event.message_received(
+                contact=contact,
+                messages=new_messages,
+                screenshot_url=None,  # 可以从 processing_stats 获取
             )
+            await self._event_bus.emit(event)
 
     async def send_ai_result(self, result: ProcessingResult) -> None:
         """发送 AI 处理结果
 
-        处理逻辑（像素级比对已在 main.py 完成）：
+        处理逻辑：
         - 发送截图给前端
         - 去重过滤（无新消息）：只发送截图，不发送消息
         - AI 分析成功：发送截图 + 发送新消息
         - AI 分析失败：发送截图 + 发送错误日志
-
-        Args:
-            result: AI 处理结果对象
         """
-        # 发送截图给前端
+        screenshot_url = None
+
+        # 发送截图
         if result.image and result.filename:
             await self.send_screenshot(
                 image=result.image,
@@ -192,6 +170,7 @@ class ConnectionManager:
                     "stage": result.stage,
                 },
             )
+            screenshot_url = f"/static/screenshots/{result.filename}"
 
         if result.stage == "dedup_filtered":
             # 去重过滤：无新消息
@@ -203,6 +182,14 @@ class ConnectionManager:
             return
 
         if result.error:
+            # 发布错误事件
+            event = Event.error(
+                code="ai_analysis_failed",
+                message=result.error,
+                contact=result.contact,
+            )
+            await self._event_bus.emit(event)
+
             await self.send_log(
                 "error",
                 f"[{result.contact}] AI 分析失败: {result.error}",
@@ -211,6 +198,7 @@ class ConnectionManager:
             return
 
         if result.new_messages:
+            # 发送消息（兼容旧协议）
             await self.send_ai_message(
                 contact=result.contact,
                 new_messages=result.new_messages,
@@ -221,6 +209,64 @@ class ConnectionManager:
                     "stage": result.stage,
                 },
             )
+
+            # 同时发送日志（兼容旧协议）
+            await self.send_log(
+                "info",
+                f"[{result.contact}] AI 识别到 {len(result.new_messages)} 条新消息",
+                {"contact": result.contact, "message_count": len(result.new_messages)},
+            )
+
+    # ============ 新事件 API ============
+
+    async def emit_message_sent(
+        self,
+        contact: str,
+        text: str,
+        success: bool,
+        error: str | None = None,
+        elapsed_ms: int = 0,
+    ) -> None:
+        """发布消息发送事件"""
+        event = Event.message_sent(
+            contact=contact,
+            text=text,
+            success=success,
+            error=error,
+            elapsed_ms=elapsed_ms,
+        )
+        await self._event_bus.emit(event)
+
+    async def emit_contact_online(
+        self,
+        contact: str,
+        window: dict[str, int] | None = None,
+    ) -> None:
+        """发布联系人上线事件"""
+        event = Event.contact_online(contact=contact, window=window)
+        await self._event_bus.emit(event)
+
+    async def emit_contact_offline(self, contact: str) -> None:
+        """发布联系人离线事件"""
+        event = Event.contact_offline(contact=contact)
+        await self._event_bus.emit(event)
+
+    async def emit_monitor_started(
+        self,
+        contacts: list[str],
+        interval: float,
+    ) -> None:
+        """发布监控启动事件"""
+        event = Event.monitor_started(contacts=contacts, interval=interval)
+        await self._event_bus.emit(event)
+
+    async def emit_monitor_stopped(
+        self,
+        stats: dict[str, Any] | None = None,
+    ) -> None:
+        """发布监控停止事件"""
+        event = Event.monitor_stopped(stats=stats)
+        await self._event_bus.emit(event)
 
 
 # 全局连接管理器实例

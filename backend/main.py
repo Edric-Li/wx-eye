@@ -1,6 +1,14 @@
 """
 WxEye - WeChat Visual Monitoring Agent
-主入口文件 - 支持多联系人独立窗口监控 + AI 消息分析
+主入口文件 - 事件驱动架构，支持外部服务订阅
+
+事件类型:
+- message.received: 收到新消息
+- message.sent: 消息发送完成
+- contact.online: 联系人窗口出现
+- contact.offline: 联系人窗口消失
+- monitor.started: 监控启动
+- monitor.stopped: 监控停止
 """
 
 from __future__ import annotations
@@ -25,12 +33,17 @@ from capture import (
     WindowInfo,
 )
 from config import get_settings
+from events import Event, get_event_bus, get_subscriber_manager
 from services.message_sender import get_sender
 
 logger = logging.getLogger(__name__)
 
 # 获取配置
 settings = get_settings()
+
+# 获取事件总线和订阅者管理器
+event_bus = get_event_bus()
+subscriber_manager = get_subscriber_manager()
 
 
 @dataclass
@@ -178,6 +191,9 @@ class MultiContactCaptureEngine:
             },
         )
 
+        # 发布监控启动事件
+        await manager.emit_monitor_started(contacts=contact_names, interval=interval)
+
         self._task = asyncio.create_task(self._capture_loop())
 
     async def stop(self) -> None:
@@ -210,6 +226,9 @@ class MultiContactCaptureEngine:
 
         await manager.send_status("stopped", status_details)
 
+        # 发布监控停止事件
+        await manager.emit_monitor_stopped(stats=status_details)
+
     def _get_contacts_status(self) -> list[dict[str, Any]]:
         """获取所有联系人状态"""
         return [
@@ -227,6 +246,9 @@ class MultiContactCaptureEngine:
         logger.info(f"开始监控 {len(self.contacts)} 个联系人窗口")
         await manager.send_log("info", f"开始监控 {len(self.contacts)} 个联系人窗口")
 
+        # 跟踪上一次的可见状态，用于检测变化
+        prev_visibility: dict[str, bool] = {name: False for name in self.contacts}
+
         while self.is_running:
             try:
                 # 获取所有微信相关窗口（应用名为"微信"的窗口）
@@ -239,9 +261,22 @@ class MultiContactCaptureEngine:
                     window = all_wechat_windows.get(contact_name)
 
                     if window:
+                        was_visible = prev_visibility.get(contact_name, False)
                         contact.is_visible = True
                         contact.last_window = window
                         visible_contacts.append(contact_name)
+
+                        # 检测上线事件（从不可见变为可见）
+                        if not was_visible:
+                            await manager.emit_contact_online(
+                                contact_name,
+                                window={
+                                    "x": window.x,
+                                    "y": window.y,
+                                    "width": window.width,
+                                    "height": window.height,
+                                },
+                            )
 
                         # 截图
                         img = self.screenshot_service.capture_window(window)
@@ -296,7 +331,15 @@ class MultiContactCaptureEngine:
                                     {"contact": contact_name, "filename": filename},
                                 )
                     else:
+                        was_visible = prev_visibility.get(contact_name, False)
                         contact.is_visible = False
+
+                        # 检测离线事件（从可见变为不可见）
+                        if was_visible:
+                            await manager.emit_contact_offline(contact_name)
+
+                    # 更新可见状态
+                    prev_visibility[contact_name] = contact.is_visible
 
                 # 更新状态
                 if visible_contacts:
@@ -480,7 +523,22 @@ async def root() -> dict[str, Any]:
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
-    """WebSocket 端点 - 处理客户端连接和命令"""
+    """WebSocket 端点 - 处理客户端连接和命令
+
+    支持新旧两种命令格式:
+    - 旧格式: {"command": "start", ...}
+    - 新格式: {"command": "monitor.start", ...}
+
+    新增命令:
+    - subscribe: 订阅事件 {"command": "subscribe", "events": ["message.received"]}
+    - unsubscribe: 取消订阅
+    - monitor.start: 启动监控
+    - monitor.stop: 停止监控
+    - message.send: 发送消息
+    - contacts.add: 添加联系人
+    - contacts.remove: 移除联系人
+    - windows.discover: 发现窗口
+    """
     await manager.connect(websocket)
 
     # 发送当前状态
@@ -491,36 +549,122 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             data = await websocket.receive_json()
 
             # 处理客户端命令
-            command = data.get("command")
+            command = data.get("command", "")
 
-            if command == "start":
+            # ============ 订阅管理（新协议） ============
+            if command == "subscribe":
+                events = data.get("events", ["*"])
+                await subscriber_manager.subscribe(websocket, events)
+                await subscriber_manager.send_to(websocket, {
+                    "type": "subscribed",
+                    "events": events,
+                })
+
+            elif command == "unsubscribe":
+                events = data.get("events", [])
+                await subscriber_manager.unsubscribe(websocket, events)
+                subscriptions = await subscriber_manager.get_subscriptions(websocket)
+                await subscriber_manager.send_to(websocket, {
+                    "type": "unsubscribed",
+                    "events": events,
+                    "remaining": list(subscriptions),
+                })
+
+            # ============ 监控命令（新格式） ============
+            elif command in ("monitor.start", "start"):
                 interval = data.get("interval", 0.1)
+                contacts = data.get("contacts")
+                # 如果指定了联系人列表，先添加
+                if contacts:
+                    for contact_name in contacts:
+                        engine.add_contact(contact_name.strip())
                 await engine.start(interval)
 
-            elif command == "stop":
+            elif command in ("monitor.stop", "stop"):
                 await engine.stop()
 
-            elif command == "status":
+            elif command in ("monitor.status", "status"):
                 await manager.send_status("current", engine.get_status())
 
-            elif command == "add_contact":
+            # ============ 消息发送（新格式） ============
+            elif command == "message.send":
+                text = data.get("text", "").strip()
+                contact = data.get("contact", "").strip()
+                if text and contact:
+                    # 获取联系人的窗口信息
+                    if contact not in engine.contacts:
+                        await event_bus.emit(Event.error(
+                            code="contact_not_monitored",
+                            message=f"联系人 '{contact}' 未在监控列表中",
+                            contact=contact,
+                        ))
+                    else:
+                        contact_monitor = engine.contacts[contact]
+                        if not contact_monitor.last_window:
+                            windows = engine._get_all_wechat_chat_windows()
+                            if contact in windows:
+                                contact_monitor.last_window = windows[contact]
+
+                        if contact_monitor.last_window:
+                            sender = get_sender()
+                            result = await sender.send(text, contact, contact_monitor.last_window)
+                            # 发布消息发送事件
+                            await manager.emit_message_sent(
+                                contact=contact,
+                                text=text,
+                                success=result.success,
+                                error=result.error,
+                                elapsed_ms=result.elapsed_ms,
+                            )
+                        else:
+                            await event_bus.emit(Event.error(
+                                code="window_not_found",
+                                message=f"找不到联系人 '{contact}' 的窗口",
+                                contact=contact,
+                            ))
+
+            # ============ 联系人管理（新格式） ============
+            elif command in ("contacts.add", "add_contact"):
                 contact_name = data.get("name", "").strip()
                 if contact_name:
                     if engine.add_contact(contact_name):
                         await manager.send_log("info", f"已添加联系人: {contact_name}")
+                        # 发布事件
+                        await event_bus.emit(Event.contact_added(contact_name))
                     else:
                         await manager.send_log("warning", f"联系人已存在: {contact_name}")
                     await manager.send_status("current", engine.get_status())
 
-            elif command == "remove_contact":
+            elif command in ("contacts.remove", "remove_contact"):
                 contact_name = data.get("name", "").strip()
                 if contact_name:
                     if engine.remove_contact(contact_name):
                         await manager.send_log("info", f"已移除联系人: {contact_name}")
+                        # 发布事件
+                        await event_bus.emit(Event.contact_removed(contact_name))
                     else:
                         await manager.send_log("warning", f"联系人不存在: {contact_name}")
                     await manager.send_status("current", engine.get_status())
 
+            elif command == "contacts.list":
+                await manager.send_status("current", engine.get_status())
+
+            # ============ 窗口发现（新格式） ============
+            elif command in ("windows.discover", "list_wechat_windows"):
+                windows = engine._get_all_wechat_chat_windows()
+                await manager.send_log(
+                    "info", f"发现 {len(windows)} 个微信聊天窗口: {list(windows.keys())}"
+                )
+                # 也发送结构化数据
+                await subscriber_manager.send_to(websocket, {
+                    "type": "windows.discovered",
+                    "windows": [
+                        {"name": name, "x": w.x, "y": w.y, "width": w.width, "height": w.height}
+                        for name, w in windows.items()
+                    ],
+                })
+
+            # ============ 旧协议兼容 ============
             elif command == "reset":
                 for contact in engine.contacts.values():
                     contact.comparator.reset()
@@ -528,28 +672,25 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     contact.significant_captures = 0
                 engine.total_captures = 0
                 engine.significant_captures = 0
-                engine.reset_ai()  # 同时重置 AI 处理器
+                engine.reset_ai()
                 await manager.send_log("info", "所有计数器已重置（包括 AI 状态）")
                 await manager.send_status("current", engine.get_status())
 
             elif command == "ai_stats":
-                # 获取 AI 统计信息
                 if engine._ai_processor:
                     stats = engine._ai_processor.get_stats()
                     await manager.send_log("info", f"AI 统计: {stats}")
                 else:
                     await manager.send_log("warning", "AI 处理器未启用")
 
-            elif command == "list_wechat_windows":
-                # 列出当前所有微信聊天窗口（帮助用户发现可以监控的窗口）
-                windows = engine._get_all_wechat_chat_windows()
-                await manager.send_log(
-                    "info", f"发现 {len(windows)} 个微信聊天窗口: {list(windows.keys())}"
-                )
+            else:
+                # 未知命令
+                logger.warning(f"Unknown WebSocket command: {command}")
 
     except WebSocketDisconnect:
         await manager.disconnect(websocket)
     except Exception as e:
+        logger.exception(f"WebSocket error: {e}")
         await manager.send_log("error", f"WebSocket error: {str(e)}")
         await manager.disconnect(websocket)
 
@@ -665,6 +806,16 @@ async def send_message(text: str, contact: str) -> dict[str, Any]:
 
     sender = get_sender()
     result = await sender.send(text, contact, contact_monitor.last_window)
+
+    # 发布消息发送事件
+    await manager.emit_message_sent(
+        contact=contact,
+        text=text,
+        success=result.success,
+        error=result.error,
+        elapsed_ms=result.elapsed_ms,
+    )
+
     return {
         "success": result.success,
         "message": result.message,
