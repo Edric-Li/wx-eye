@@ -636,7 +636,7 @@ async def reset_ai(contact: str | None = None) -> dict[str, Any]:
 async def send_message(text: str, contact: str) -> dict[str, Any]:
     """发送微信消息到指定联系人
 
-    通过 UI 自动化发送消息。自动根据联系人窗口位置计算输入框坐标。
+    通过 UI 自动化发送消息。消息会加入队列，确保同一时间只有一个发送操作。
 
     Args:
         text: 要发送的消息文本
@@ -664,14 +664,13 @@ async def send_message(text: str, contact: str) -> dict[str, Any]:
             }
 
     sender = get_sender()
-    sender.set_window(contact_monitor.last_window)
-    result = await sender.send(text)
+    result = await sender.send(text, contact, contact_monitor.last_window)
     return {
         "success": result.success,
         "message": result.message,
         "elapsed_ms": result.elapsed_ms,
         "error": result.error,
-        "contact": contact,
+        "contact": result.contact,
     }
 
 
