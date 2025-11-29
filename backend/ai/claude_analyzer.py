@@ -117,23 +117,18 @@ class ClaudeAnalyzer:
         """构建分析提示词"""
         return """分析这张微信聊天截图，提取所有可见的消息。
 
-返回JSON格式：
-{
-  "messages": [
-    {"sender": "发送者名称", "content": "消息内容"}
-  ],
-  "summary": "简短摘要"
-}
+返回JSON二维数组：[["发送者", "消息内容"], ...]
 
-注意：
-- 右侧绿色气泡是"我"发的
-- 左侧白色气泡是别人发的，需要识别消息上方显示的发送者昵称
-- 如果是群聊，每条消息上方会有发送者名称，请准确提取
-- 如果是私聊且看不到名称，左侧消息sender填"对方"
-- 灰色小气泡是引用/回复的历史消息，请忽略不要提取
-- 按时间顺序从上到下排列
-- 如果图片是黑色/空白/模糊/无法识别任何聊天内容，直接返回：{"messages": [], "summary": ""}
-- 只返回JSON，不要任何解释或说明文字"""
+发送者规则：
+- 右侧绿色气泡填 "$self"
+- 左侧白色气泡：群聊填消息上方的昵称，私聊填 "$other"
+- 忽略灰色引用气泡
+- 按时间顺序从上到下
+
+示例：[["$self", "你好"], ["张三", "收到"], ["$other", "好的"]]
+
+如果无法识别内容返回：[]
+只返回JSON，不要解释"""
 
     async def analyze(
         self,
@@ -294,9 +289,17 @@ class ClaudeAnalyzer:
 
             data = json.loads(json_text)
 
-            result.new_messages = data.get("messages", [])
-            result.has_new_content = data.get("has_new_content", len(result.new_messages) > 0)
-            result.summary = data.get("summary", "")
+            # 解析二维数组格式：[["sender", "content"], ...]
+            if isinstance(data, list):
+                result.new_messages = [
+                    {"sender": msg[0], "content": msg[1]}
+                    for msg in data
+                    if isinstance(msg, list) and len(msg) >= 2
+                ]
+            else:
+                result.new_messages = []
+
+            result.has_new_content = len(result.new_messages) > 0
 
         except json.JSONDecodeError as e:
             logger.warning(f"[{contact}] JSON 解析失败: {e}\nAI 原始回复:\n{raw_text}")
