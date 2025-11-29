@@ -557,12 +557,11 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     - contacts.remove: 移除联系人
     - windows.discover: 发现窗口
     """
-    await manager.connect(websocket)
-
-    # 发送当前状态
-    await manager.send_status("connected", engine.get_status())
-
     try:
+        await manager.connect(websocket)
+
+        # 发送当前状态
+        await manager.send_status("connected", engine.get_status())
         while True:
             data = await websocket.receive_json()
 
@@ -712,10 +711,10 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 logger.warning(f"Unknown WebSocket command: {command}")
 
     except WebSocketDisconnect:
-        await manager.disconnect(websocket)
+        pass
     except Exception as e:
         logger.exception(f"WebSocket error: {e}")
-        await manager.send_log("error", f"WebSocket error: {str(e)}")
+    finally:
         await manager.disconnect(websocket)
 
 
