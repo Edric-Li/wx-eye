@@ -1,0 +1,56 @@
+[project]
+name = "auto-weixin"
+version = "0.2.0"
+description = "WeChat window vision monitoring agent"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "websockets>=12.0",
+    "mss>=9.0.1",
+    "Pillow>=10.2.0",
+    "imagehash>=4.3.1",
+    "pydantic>=2.5.3",
+]
+
+[project.optional-dependencies]
+macos = [
+    "pyobjc-framework-Quartz>=10.1",
+    "pyobjc-framework-Cocoa>=10.1",
+]
+windows = [
+    "pygetwindow>=0.0.9",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "ruff>=0.8.0",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "SIM",    # flake8-simplify
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B008",   # do not perform function calls in argument defaults
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["capture", "api"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
