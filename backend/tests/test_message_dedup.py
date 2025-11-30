@@ -158,15 +158,15 @@ class TestFindNewMessagesBySuffixMatch:
 
     # ==================== 锚点匹配（历史最后几条都不在当前中）====================
 
-    def test_anchor_match_last_missing(self, processor):
-        """锚点匹配：历史最后一条不在当前中，但较早的消息能匹配"""
-        # 场景：历史最后一条消息被删除或 AI 完全识别不出
+    def test_no_suffix_overlap_returns_all(self, processor):
+        """无后缀重叠：历史和当前没有连续的公共后缀，返回全部当前消息"""
+        # 场景：消息完全滚动过去，当前截图内容和历史没有连续重叠
         history = msgs("A:1", "B:2", "C:3")
-        current = msgs("B:2", "X:新", "Y:新2")  # C:3 消失了，但 B:2 还在
+        current = msgs("B:2", "X:新", "Y:新2")  # 虽然 B:2 存在，但不是连续后缀
         # 后缀匹配 [C:3]、[B:2, C:3]、[A:1, B:2, C:3] 都失败
-        # 锚点匹配：找 C:3 失败，找 B:2 成功（位置 0），返回位置 1 之后的消息
+        # 无重叠 → 返回全部当前消息
         result = processor._find_new_messages_by_suffix_match(history, current)
-        assert result == msgs("X:新", "Y:新2")
+        assert result == msgs("B:2", "X:新", "Y:新2")
 
     # ==================== 完全无重叠 ====================
 

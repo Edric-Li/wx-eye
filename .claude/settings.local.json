@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(test:*)",
+      "Bash(.venv/Scripts/python.exe:*)",
+      "Bash(npm run dev:*)",
+      "Bash(curl:*)",
+      "Bash(timeout /t 3)",
+      "Bash(.venvScriptsactivate)",
+      "Bash(uvicorn main:app:*)",
+      "Bash(source .venv/Scripts/activate)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git config:*)",
+      "Bash(git push)",
+      "Bash(cat:*)",
+      "Bash(git pull:*)",
+      "Bash(git rebase:*)",
+      "Bash(netstat:*)",
+      "Bash(findstr:*)",
+      "Bash(tasklist /fi \"PID eq 12884\" /fo csv /nh)",
+      "Bash(tasklist:*)",
+      "Bash(wmic:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(python:*)",
+      "Bash(.venv/Scripts/pip.exe install:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

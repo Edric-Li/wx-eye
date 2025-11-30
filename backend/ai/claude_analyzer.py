@@ -98,7 +98,7 @@ class ClaudeAnalyzer:
         previous_messages: list[str] | None = None,
     ) -> str:
         """构建分析提示词"""
-        return """提取微信聊天截图中的消息。返回JSON数组。
+        return """提取微信聊天截图中的消息。用XML格式返回。
 
 规则：
 1. 绿色气泡 → 发送者="$self"
@@ -108,9 +108,18 @@ class ClaudeAnalyzer:
 
 注意：截图顶部第一条消息如果昵称被截断不可见，必须跳过！不要猜测！
 
-格式：[["发送者", "消息内容"], ...]
-示例：[["无趣.", "99"], ["无趣.", "a"]]
-只返回JSON"""
+格式：
+<messages>
+<m><s>发送者</s><c>消息内容</c></m>
+</messages>
+
+示例：
+<messages>
+<m><s>无趣.</s><c>99</c></m>
+<m><s>无趣.</s><c>a</c></m>
+</messages>
+
+只返回XML，不要任何其他内容。"""
 
     async def analyze(
         self,
@@ -245,6 +254,97 @@ class ClaudeAnalyzer:
             },
         }
 
+    def _normalize_json_quotes(self, json_text: str) -> str:
+        """规范化 JSON 字符串中的引号
+
+        Claude 有时会在 JSON 输出中混用中文引号和英文引号，导致解析失败。
+        这个方法会智能地处理这种情况。
+
+        Args:
+            json_text: 原始 JSON 文本
+
+        Returns:
+            规范化后的 JSON 文本
+        """
+        # 简单策略：直接将中文引号替换为英文引号
+        # 这对于 JSON 结构来说是安全的，因为：
+        # 1. 如果中文引号是 JSON 边界符，替换成英文引号是正确的
+        # 2. 如果中文引号在字符串内容中，替换成英文引号后需要转义
+        #
+        # 但是情况2比较复杂，我们采用另一种策略：
+        # 将中文引号替换成一个安全的占位符，解析成功后再还原
+
+        # 检查是否包含中文引号
+        if '\u201c' not in json_text and '\u201d' not in json_text:
+            # 没有中文引号，直接返回
+            return json_text
+
+        # 尝试先直接解析，如果成功就不需要处理
+        try:
+            json.loads(json_text)
+            return json_text
+        except json.JSONDecodeError:
+            pass
+
+        # 策略：将中文引号成对替换
+        # 在 JSON 中，字符串边界的引号总是成对出现的：["...", "..."]
+        # 我们需要找到这些结构边界处的中文引号并替换为英文引号
+
+        result = []
+        i = 0
+        in_string = False
+        string_start_char = None
+
+        while i < len(json_text):
+            char = json_text[i]
+
+            if not in_string:
+                # 不在字符串内
+                if char == '"':
+                    in_string = True
+                    string_start_char = '"'
+                    result.append(char)
+                elif char == '\u201c':  # 中文左引号作为字符串开始
+                    in_string = True
+                    string_start_char = '\u201c'
+                    result.append('"')  # 替换为英文引号
+                else:
+                    result.append(char)
+            else:
+                # 在字符串内
+                if char == '\\' and i + 1 < len(json_text):
+                    # 转义序列，跳过下一个字符
+                    result.append(char)
+                    result.append(json_text[i + 1])
+                    i += 2
+                    continue
+                elif (string_start_char == '"' and char == '"') or \
+                     (string_start_char == '\u201c' and char == '\u201d'):
+                    # 字符串结束
+                    in_string = False
+                    string_start_char = None
+                    result.append('"')  # 统一用英文引号结束
+                elif char in '\u201c\u201d':
+                    # 字符串内部的中文引号，需要转义
+                    result.append('\\"')
+                else:
+                    result.append(char)
+
+            i += 1
+
+        normalized = ''.join(result)
+
+        # 验证规范化后的 JSON 是否有效
+        try:
+            json.loads(normalized)
+            return normalized
+        except json.JSONDecodeError:
+            # 如果还是失败，尝试最后的简单替换策略
+            # 直接替换所有中文引号为英文引号
+            simple_replace = json_text.replace('\u201c', '"').replace('\u201d', '"')
+            simple_replace = simple_replace.replace('\u2018', "'").replace('\u2019', "'")
+            return simple_replace
+
     def _parse_response(
         self,
         contact: str,
@@ -259,41 +359,87 @@ class ClaudeAnalyzer:
         usage = response.get("usage", {})
         result.tokens_used = usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
 
-        # 尝试解析 JSON
+        # 尝试解析 XML
         try:
-            # 提取 JSON 部分（可能被包裹在 markdown 代码块中）
-            json_text = raw_text
-            if "```json" in raw_text:
-                start = raw_text.find("```json") + 7
+            # 提取 XML 部分（可能被包裹在 markdown 代码块中）
+            xml_text = raw_text
+            if "```xml" in raw_text:
+                start = raw_text.find("```xml") + 6
                 end = raw_text.find("```", start)
-                json_text = raw_text[start:end].strip()
+                xml_text = raw_text[start:end].strip()
             elif "```" in raw_text:
                 start = raw_text.find("```") + 3
                 end = raw_text.find("```", start)
-                json_text = raw_text[start:end].strip()
+                xml_text = raw_text[start:end].strip()
 
-            data = json.loads(json_text)
+            # 确保有 messages 根元素
+            if "<messages>" not in xml_text:
+                # 可能只返回了消息内容，尝试包装
+                if "<m>" in xml_text:
+                    xml_text = f"<messages>{xml_text}</messages>"
 
-            # 解析二维数组格式：[["sender", "content"], ...]
-            if isinstance(data, list):
-                result.new_messages = [
-                    {"sender": msg[0], "content": msg[1]}
-                    for msg in data
-                    if isinstance(msg, list) and len(msg) >= 2
-                ]
-            else:
-                result.new_messages = []
-
+            result.new_messages = self._parse_xml_messages(xml_text)
             result.has_new_content = len(result.new_messages) > 0
 
             # 记录 AI 原始输出用于调试
             logger.info(f"[{contact}] [AI] 原始输出: {raw_text[:500]}")
 
-        except json.JSONDecodeError as e:
-            logger.warning(f"[{contact}] JSON 解析失败: {e}\nAI 原始回复:\n{raw_text}")
-            result.error = f"JSON 解析失败: {e}"
+        except Exception as e:
+            # 如果 XML 解析失败，尝试回退到 JSON 解析（兼容旧响应）
+            try:
+                result.new_messages = self._parse_json_fallback(raw_text)
+                result.has_new_content = len(result.new_messages) > 0
+                logger.info(f"[{contact}] [AI] XML解析失败，JSON回退成功")
+            except Exception as json_e:
+                logger.warning(f"[{contact}] 解析失败: XML={e}, JSON={json_e}\nAI 原始回复:\n{raw_text}")
+                result.error = f"解析失败: {e}"
 
         return result
+
+    def _parse_xml_messages(self, xml_text: str) -> list[dict[str, Any]]:
+        """解析 XML 格式的消息"""
+        import re
+
+        messages = []
+        # 使用正则表达式提取消息，比 XML 解析器更宽容
+        pattern = r'<m>\s*<s>(.*?)</s>\s*<c>(.*?)</c>\s*</m>'
+        matches = re.findall(pattern, xml_text, re.DOTALL)
+
+        for sender, content in matches:
+            # 清理可能的 CDATA 或转义
+            sender = sender.strip()
+            content = content.strip()
+            # 处理 XML 实体
+            content = content.replace('&lt;', '<').replace('&gt;', '>')
+            content = content.replace('&amp;', '&').replace('&quot;', '"')
+            messages.append({"sender": sender, "content": content})
+
+        return messages
+
+    def _parse_json_fallback(self, raw_text: str) -> list[dict[str, Any]]:
+        """JSON 回退解析（用于兼容旧格式响应）"""
+        json_text = raw_text
+        if "```json" in raw_text:
+            start = raw_text.find("```json") + 7
+            end = raw_text.find("```", start)
+            json_text = raw_text[start:end].strip()
+        elif "```" in raw_text:
+            start = raw_text.find("```") + 3
+            end = raw_text.find("```", start)
+            json_text = raw_text[start:end].strip()
+
+        # 规范化引号
+        json_text = self._normalize_json_quotes(json_text)
+
+        data = json.loads(json_text)
+
+        if isinstance(data, list):
+            return [
+                {"sender": msg[0], "content": msg[1]}
+                for msg in data
+                if isinstance(msg, list) and len(msg) >= 2
+            ]
+        return []
 
     def get_stats(self) -> dict[str, Any]:
         """获取统计信息"""
