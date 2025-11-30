@@ -1,4 +1,6 @@
+import { useState, useEffect } from 'react'
 import { Monitor } from './components/Monitor'
+import { Login } from './components/Login'
 
 // Global styles
 const globalStyles = `
@@ -32,10 +34,40 @@ const globalStyles = `
 `
 
 function App() {
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    // 检查本地存储的认证状态
+    const auth = localStorage.getItem('wxeye_authenticated')
+    setIsAuthenticated(auth === 'true')
+  }, [])
+
+  const handleLogin = () => {
+    setIsAuthenticated(true)
+  }
+
+  // 加载中状态
+  if (isAuthenticated === null) {
+    return (
+      <>
+        <style>{globalStyles}</style>
+        <div style={{
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          minHeight: '100vh',
+          color: '#8892b0',
+        }}>
+          加载中...
+        </div>
+      </>
+    )
+  }
+
   return (
     <>
       <style>{globalStyles}</style>
-      <Monitor />
+      {isAuthenticated ? <Monitor /> : <Login onLogin={handleLogin} />}
     </>
   )
 }

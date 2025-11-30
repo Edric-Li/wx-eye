@@ -11,9 +11,34 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from capture import WindowFinder
+from config import get_settings
 
 router = APIRouter()
 finder = WindowFinder()
+
+
+class AuthRequest(BaseModel):
+    """认证请求"""
+
+    password: str
+
+
+class AuthResponse(BaseModel):
+    """认证响应"""
+
+    success: bool
+    message: str = ""
+
+
+@router.post("/auth", response_model=AuthResponse)
+async def authenticate(request: AuthRequest):
+    """验证 Web 访问密码"""
+    settings = get_settings()
+    if not settings.web_password:
+        return AuthResponse(success=False, message="未配置访问密码，请在 .env 中设置 WEB_PASSWORD")
+    if request.password == settings.web_password:
+        return AuthResponse(success=True, message="认证成功")
+    return AuthResponse(success=False, message="密码错误")
 
 
 class WindowResponse(BaseModel):

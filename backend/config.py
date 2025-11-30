@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     # ============ 成本控制 ============
     max_ai_calls_per_minute: int = 10  # API 调用限制
 
+    # ============ Web 认证 ============
+    web_password: Optional[str] = None  # Web 页面访问密码，未设置时禁止访问
+
     @property
     def is_ai_enabled(self) -> bool:
         """检查 AI 是否可用"""
