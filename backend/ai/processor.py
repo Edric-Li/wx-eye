@@ -14,7 +14,6 @@ from typing import Any, Callable, Optional
 
 from PIL import Image
 
-from .message_deduplicator import MessageDeduplicator
 from .claude_analyzer import ClaudeAnalyzer, AnalysisResult
 
 logger = logging.getLogger(__name__)
@@ -75,7 +74,6 @@ class AIMessageProcessor:
             model: Claude 模型选择
             enable_ai: 是否启用 AI 分析
         """
-        self.dedup = MessageDeduplicator()
         self.claude: ClaudeAnalyzer | None = None
         self.enable_ai = enable_ai
 
@@ -445,11 +443,6 @@ class AIMessageProcessor:
 
         new_start = self._find_overlap_end(history, current)
 
-        if new_start is None:
-            # 完全没有重叠
-            logger.warning("历史与当前完全无重叠，重置基线并返回当前消息")
-            return list(current)
-
         new_messages = list(current[new_start:])
         if new_messages:
             logger.debug(f"识别新消息: {len(new_messages)} 条")
@@ -459,28 +452,20 @@ class AIMessageProcessor:
         self,
         history: list[tuple[str, str]],
         current: list[tuple[str, str]],
-    ) -> int | None:
+    ) -> int:
         """找到历史与当前重叠区域的结束位置
 
-        简单策略：找历史后缀在当前中的匹配位置
+        前置条件：history 和 current 都非空（调用方需保证）
 
-        示例:
-            历史: [A, B, C]
-            当前: [B, C, D]
-            → 历史后缀 [B, C] 在当前位置 0 匹配，返回 2（新消息从 D 开始）
-
-            历史: [A, B, C]
-            当前: [X, Y, Z]
-            → 无匹配，返回 None（全部是新消息）
+        匹配策略：
+        1. 后缀序列匹配：找历史后缀在当前中的完整匹配
+        2. 锚点匹配：找历史中任意一条消息在当前中的位置
 
         Returns:
-            重叠结束后的位置索引（新消息从此开始），无重叠返回 None
+            重叠结束后的位置索引（新消息从此开始）
         """
-        if not history or not current:
-            return None
-
-        # 从最长后缀开始尝试匹配，找到第一个匹配的
-        max_suffix_len = min(len(history), len(current))
+        # 策略1：后缀序列匹配（优先，更精确）
+        max_suffix_len = min(len(history), len(current), 50)
         for suffix_len in range(max_suffix_len, 0, -1):
             suffix = history[-suffix_len:]
             match_pos = self._find_sequence(current, suffix)
@@ -488,9 +473,18 @@ class AIMessageProcessor:
                 logger.debug(f"后缀匹配成功: 历史后缀长度={suffix_len}, 当前位置={match_pos}")
                 return match_pos + suffix_len
 
-        # 完全无匹配，返回 None（全部是新消息）
-        logger.info(f"历史与当前无重叠 (历史={len(history)}条, 当前={len(current)}条)")
-        return None
+        # 策略2：锚点匹配（后备）
+        for anchor_idx in range(len(history) - 1, -1, -1):
+            anchor = history[anchor_idx]
+            # 从后向前找（取最后出现的位置）
+            for pos in range(len(current) - 1, -1, -1):
+                if self._messages_equal(current[pos], anchor):
+                    logger.debug(f"锚点匹配: anchor_idx={anchor_idx}, pos={pos}")
+                    return pos + 1
+
+        # 无法匹配，只取最后一条作为新消息
+        logger.warning(f"无法确定匹配位置，返回最后一条消息位置")
+        return len(current) - 1
 
     def _find_sequence(
         self,
@@ -543,13 +537,8 @@ class AIMessageProcessor:
             result = history.copy()
         else:
             new_start = self._find_overlap_end(history, current)
-            if new_start is None:
-                # 完全无重叠，用当前替换
-                logger.warning("合并历史: 完全无重叠，用当前消息替换历史")
-                result = current.copy()
-            else:
-                # 历史 + 当前新增部分
-                result = list(history) + list(current[new_start:])
+            # 历史 + 当前新增部分
+            result = list(history) + list(current[new_start:])
 
         # 限制大小
         if len(result) > max_size:
@@ -562,8 +551,6 @@ class AIMessageProcessor:
         Args:
             contact: 指定联系人，为 None 时重置所有
         """
-        self.dedup.reset(contact)
-
         # 重置消息历史和已发送消息缓存
         if contact is None:
             self._message_history.clear()
