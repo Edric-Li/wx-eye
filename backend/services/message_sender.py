@@ -18,6 +18,20 @@ from typing import TYPE_CHECKING, Optional, Any
 import pyautogui
 import pyperclip
 
+# Windows API 支持
+if platform.system() == "Windows":
+    try:
+        import win32gui
+        import win32con
+        import win32clipboard
+        import win32api
+        HAS_WIN32 = True
+    except ImportError:
+        HAS_WIN32 = False
+        logging.warning("pywin32 not available, falling back to pyautogui")
+else:
+    HAS_WIN32 = False
+
 if TYPE_CHECKING:
     from capture import WindowInfo
 
@@ -113,7 +127,10 @@ class MessageSender:
         self.total_failed = 0
         self.queue_size = 0
 
-        logger.info(f"消息发送器初始化: platform={self.system}")
+        # 发送方法选择
+        self.use_win32_api = HAS_WIN32 and self.system == "Windows"
+
+        logger.info(f"消息发送器初始化: platform={self.system}, use_win32_api={self.use_win32_api}")
 
     def set_window(self, window: WindowInfo) -> None:
         """设置目标窗口
@@ -234,6 +251,232 @@ class MessageSender:
             return True
         except Exception as e:
             logger.error(f"按回车失败: {e}")
+            return False
+
+    # ========== Win32 API 方法 ==========
+
+    def _set_clipboard_win32(self, text: str) -> bool:
+        """使用 Win32 API 设置剪贴板内容
+
+        Args:
+            text: 要设置的文本
+
+        Returns:
+            是否成功
+        """
+        if not HAS_WIN32:
+            return False
+
+        try:
+            win32clipboard.OpenClipboard()
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
+            win32clipboard.CloseClipboard()
+            return True
+        except Exception as e:
+            logger.error(f"Win32 设置剪贴板失败: {e}")
+            try:
+                win32clipboard.CloseClipboard()
+            except:
+                pass
+            return False
+
+    def _activate_window_win32(self, hwnd: int) -> bool:
+        """使用 Win32 API 激活窗口
+
+        Args:
+            hwnd: 窗口句柄
+
+        Returns:
+            是否成功
+        """
+        if not HAS_WIN32:
+            return False
+
+        try:
+            # 如果窗口最小化，先恢复
+            if win32gui.IsIconic(hwnd):
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                time.sleep(0.1)
+
+            # 激活窗口
+            win32gui.SetForegroundWindow(hwnd)
+            time.sleep(0.1)
+            return True
+        except Exception as e:
+            logger.error(f"Win32 激活窗口失败: {e}")
+            return False
+
+    def _send_keys_win32(self, hwnd: int, text: str) -> bool:
+        """使用 Win32 API 发送键盘消息
+
+        使用 SendInput 模拟键盘输入（更可靠）
+
+        Args:
+            hwnd: 窗口句柄
+            text: 要发送的文本
+
+        Returns:
+            是否成功
+        """
+        if not HAS_WIN32:
+            return False
+
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            # 1. 设置剪贴板
+            if not self._set_clipboard_win32(text):
+                return False
+
+            # 定义 INPUT 结构
+            PUL = ctypes.POINTER(ctypes.c_ulong)
+
+            class KeyBdInput(ctypes.Structure):
+                _fields_ = [
+                    ("wVk", wintypes.WORD),
+                    ("wScan", wintypes.WORD),
+                    ("dwFlags", wintypes.DWORD),
+                    ("time", wintypes.DWORD),
+                    ("dwExtraInfo", PUL)
+                ]
+
+            class HardwareInput(ctypes.Structure):
+                _fields_ = [
+                    ("uMsg", wintypes.DWORD),
+                    ("wParamL", wintypes.WORD),
+                    ("wParamH", wintypes.WORD)
+                ]
+
+            class MouseInput(ctypes.Structure):
+                _fields_ = [
+                    ("dx", wintypes.LONG),
+                    ("dy", wintypes.LONG),
+                    ("mouseData", wintypes.DWORD),
+                    ("dwFlags", wintypes.DWORD),
+                    ("time", wintypes.DWORD),
+                    ("dwExtraInfo", PUL)
+                ]
+
+            class Input_I(ctypes.Union):
+                _fields_ = [
+                    ("ki", KeyBdInput),
+                    ("mi", MouseInput),
+                    ("hi", HardwareInput)
+                ]
+
+            class Input(ctypes.Structure):
+                _fields_ = [
+                    ("type", wintypes.DWORD),
+                    ("ii", Input_I)
+                ]
+
+            # 常量
+            INPUT_KEYBOARD = 1
+            KEYEVENTF_KEYUP = 0x0002
+            VK_CONTROL = 0x11
+            VK_V = 0x56
+            VK_RETURN = 0x0D
+
+            # 创建输入事件序列
+            inputs = []
+
+            # Ctrl 按下
+            inputs.append(Input(
+                type=INPUT_KEYBOARD,
+                ii=Input_I(ki=KeyBdInput(wVk=VK_CONTROL, wScan=0, dwFlags=0, time=0, dwExtraInfo=None))
+            ))
+
+            # V 按下
+            inputs.append(Input(
+                type=INPUT_KEYBOARD,
+                ii=Input_I(ki=KeyBdInput(wVk=VK_V, wScan=0, dwFlags=0, time=0, dwExtraInfo=None))
+            ))
+
+            # V 释放
+            inputs.append(Input(
+                type=INPUT_KEYBOARD,
+                ii=Input_I(ki=KeyBdInput(wVk=VK_V, wScan=0, dwFlags=KEYEVENTF_KEYUP, time=0, dwExtraInfo=None))
+            ))
+
+            # Ctrl 释放
+            inputs.append(Input(
+                type=INPUT_KEYBOARD,
+                ii=Input_I(ki=KeyBdInput(wVk=VK_CONTROL, wScan=0, dwFlags=KEYEVENTF_KEYUP, time=0, dwExtraInfo=None))
+            ))
+
+            # 发送 Ctrl+V
+            input_array = (Input * len(inputs))(*inputs)
+            ctypes.windll.user32.SendInput(len(inputs), input_array, ctypes.sizeof(Input))
+            time.sleep(0.1)
+
+            # 发送 Enter
+            enter_inputs = []
+            enter_inputs.append(Input(
+                type=INPUT_KEYBOARD,
+                ii=Input_I(ki=KeyBdInput(wVk=VK_RETURN, wScan=0, dwFlags=0, time=0, dwExtraInfo=None))
+            ))
+            enter_inputs.append(Input(
+                type=INPUT_KEYBOARD,
+                ii=Input_I(ki=KeyBdInput(wVk=VK_RETURN, wScan=0, dwFlags=KEYEVENTF_KEYUP, time=0, dwExtraInfo=None))
+            ))
+
+            enter_array = (Input * len(enter_inputs))(*enter_inputs)
+            ctypes.windll.user32.SendInput(len(enter_inputs), enter_array, ctypes.sizeof(Input))
+
+            return True
+        except Exception as e:
+            logger.error(f"Win32 发送键盘消息失败: {e}")
+            return False
+
+    def _send_via_win32_api(self, text: str, contact: str = "") -> bool:
+        """使用 Win32 API 发送消息（不依赖桌面会话）
+
+        Args:
+            text: 要发送的消息
+            contact: 联系人名称
+
+        Returns:
+            是否成功
+        """
+        if not HAS_WIN32:
+            logger.warning("Win32 API 不可用")
+            return False
+
+        if not self._current_window or not self._current_window.window_id:
+            logger.warning("窗口句柄未设置")
+            return False
+
+        hwnd = self._current_window.window_id
+
+        try:
+            logger.info(f"[{contact}] 使用 Win32 API 发送消息")
+
+            # 1. 激活窗口
+            if not self._activate_window_win32(hwnd):
+                logger.warning("激活窗口失败，尝试继续")
+
+            # 2. 点击输入框（使用 pyautogui，但 Win32 API 会尝试让它工作）
+            pos = self._calculate_input_box_position()
+            if pos:
+                x, y = pos
+                # 使用 SendMessage 发送鼠标点击
+                lParam = win32api.MAKELONG(x - self._current_window.x, y - self._current_window.y)
+                win32api.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lParam)
+                time.sleep(0.02)
+                win32api.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, lParam)
+                time.sleep(0.1)
+
+            # 3. 发送文本
+            if not self._send_keys_win32(hwnd, text):
+                return False
+
+            logger.info(f"[{contact}] Win32 API 发送成功")
+            return True
+
+        except Exception as e:
+            logger.error(f"Win32 API 发送失败: {e}")
             return False
 
     def _parse_message_segments(self, text: str) -> list[MessageSegment]:
@@ -391,6 +634,8 @@ class MessageSender:
     def send_sync(self, text: str, contact: str = "") -> SendResult:
         """同步发送消息
 
+        优先使用 Win32 API（不依赖桌面会话），失败时降级到 pyautogui
+
         Args:
             text: 要发送的消息文本
             contact: 联系人名称
@@ -411,7 +656,29 @@ class MessageSender:
         text = text.strip()
         logger.info(f"[{contact}] 准备发送消息: {text[:50]}{'...' if len(text) > 50 else ''}")
 
+        # 检查是否包含 @ 提及
+        has_mentions = self._has_mentions(text)
+
+        # Windows 平台优先使用 Win32 API（仅支持普通消息，不支持 @ 提及）
+        if self.use_win32_api and not has_mentions:
+            logger.info(f"[{contact}] 尝试使用 Win32 API 发送")
+            if self._send_via_win32_api(text, contact):
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                self.total_sent += 1
+                logger.info(f"[{contact}] Win32 API 发送成功: {elapsed_ms}ms")
+                return SendResult(
+                    success=True,
+                    message="发送成功 (Win32 API)",
+                    elapsed_ms=elapsed_ms,
+                    contact=contact,
+                )
+            else:
+                logger.warning(f"[{contact}] Win32 API 发送失败，降级到 pyautogui")
+
+        # 降级到 pyautogui 方法
         try:
+            logger.info(f"[{contact}] 使用 pyautogui 发送")
+
             # 1. 点击输入框
             if not self._click_input_box():
                 self.total_failed += 1
@@ -424,7 +691,6 @@ class MessageSender:
                 )
 
             # 2. 输入消息内容
-            has_mentions = self._has_mentions(text)
             if has_mentions:
                 # 包含 @ 提及：使用分段处理
                 logger.info(f"[{contact}] 检测到 @ 提及，使用分段输入")
@@ -463,11 +729,11 @@ class MessageSender:
             elapsed_ms = int((time.time() - start_time) * 1000)
             self.total_sent += 1
 
-            logger.info(f"[{contact}] 消息发送成功: {elapsed_ms}ms")
+            logger.info(f"[{contact}] pyautogui 发送成功: {elapsed_ms}ms")
 
             return SendResult(
                 success=True,
-                message="发送成功",
+                message="发送成功 (pyautogui)",
                 elapsed_ms=elapsed_ms,
                 contact=contact,
             )
