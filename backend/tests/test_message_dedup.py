@@ -158,24 +158,24 @@ class TestFindNewMessagesBySuffixMatch:
 
     # ==================== 锚点匹配（历史最后几条都不在当前中）====================
 
-    def test_no_suffix_overlap_returns_all(self, processor):
-        """无后缀重叠：历史和当前没有连续的公共后缀，返回全部当前消息"""
+    def test_no_suffix_overlap_uses_anchor(self, processor):
+        """无后缀重叠：使用锚点匹配找到历史中的消息"""
         # 场景：消息完全滚动过去，当前截图内容和历史没有连续重叠
         history = msgs("A:1", "B:2", "C:3")
-        current = msgs("B:2", "X:新", "Y:新2")  # 虽然 B:2 存在，但不是连续后缀
-        # 后缀匹配 [C:3]、[B:2, C:3]、[A:1, B:2, C:3] 都失败
-        # 无重叠 → 返回全部当前消息
+        current = msgs("B:2", "X:新", "Y:新2")  # B:2 存在于历史中，可作为锚点
+        # 后缀匹配失败后，锚点匹配找到 B:2，返回其后的消息
         result = processor._find_new_messages_by_suffix_match(history, current)
-        assert result == msgs("B:2", "X:新", "Y:新2")
+        assert result == msgs("X:新", "Y:新2")
 
     # ==================== 完全无重叠 ====================
 
-    def test_no_overlap_returns_all(self, processor):
-        """完全无重叠时返回所有当前消息"""
+    def test_no_overlap_returns_last(self, processor):
+        """完全无重叠时保守返回最后一条（避免误报）"""
         history = msgs("A:旧1", "B:旧2")
         current = msgs("X:新1", "Y:新2", "Z:新3")
         result = processor._find_new_messages_by_suffix_match(history, current)
-        assert result == msgs("X:新1", "Y:新2", "Z:新3")
+        # 无法确定匹配位置时，保守只返回最后一条
+        assert result == msgs("Z:新3")
 
 
 class TestMergeHistory:
@@ -264,13 +264,13 @@ class TestMergeHistory:
 
     # ==================== 完全无重叠 ====================
 
-    def test_no_overlap_replace(self, processor):
-        """完全无重叠时用当前替换"""
+    def test_no_overlap_append_last(self, processor):
+        """完全无重叠时追加最后一条新消息"""
         history = msgs("A:旧1", "B:旧2")
         current = msgs("X:新1", "Y:新2")
         result = processor._merge_history(history, current)
-        # 应该用当前替换历史
-        assert result == msgs("X:新1", "Y:新2")
+        # 无法确定匹配位置时，保守只追加最后一条
+        assert result == msgs("A:旧1", "B:旧2", "Y:新2")
 
     # ==================== 大小限制 ====================
 
@@ -419,33 +419,93 @@ class TestFindSequence:
         assert processor._find_sequence(messages, sequence) == 0  # 返回第一个
 
 
-class TestSenderNormalization:
-    """发送者昵称标准化测试（忽略标点符号）"""
+class TestNormalizeText:
+    """文本标准化测试（忽略标点符号和 emoji）"""
 
     @pytest.fixture
     def processor(self):
         return AIMessageProcessor(api_key="", enable_ai=False)
 
-    def test_normalize_sender_period(self, processor):
+    # ==================== 标点符号标准化 ====================
+
+    def test_normalize_period(self, processor):
         """标准化：英文句号 vs 中文句号"""
-        assert processor._normalize_sender("无趣.") == processor._normalize_sender("无趣。")
+        assert processor._normalize_text("无趣.") == processor._normalize_text("无趣。")
 
-    def test_normalize_sender_exclamation(self, processor):
+    def test_normalize_exclamation(self, processor):
         """标准化：英文感叹号 vs 中文感叹号"""
-        assert processor._normalize_sender("test!") == processor._normalize_sender("test！")
+        assert processor._normalize_text("test!") == processor._normalize_text("test！")
 
-    def test_normalize_sender_mixed(self, processor):
+    def test_normalize_question(self, processor):
+        """标准化：英文问号 vs 中文问号"""
+        assert processor._normalize_text("你好?") == processor._normalize_text("你好？")
+
+    def test_normalize_mixed_punctuation(self, processor):
         """标准化：混合标点"""
-        assert processor._normalize_sender("用户.名!") == processor._normalize_sender("用户。名！")
+        assert processor._normalize_text("用户.名!") == processor._normalize_text("用户。名！")
 
-    def test_normalize_sender_empty(self, processor):
+    def test_normalize_empty(self, processor):
         """标准化：空字符串"""
-        assert processor._normalize_sender("") == ""
+        assert processor._normalize_text("") == ""
 
-    def test_normalize_sender_only_punctuation(self, processor):
+    def test_normalize_only_punctuation(self, processor):
         """标准化：只有标点符号"""
-        assert processor._normalize_sender("...") == ""
-        assert processor._normalize_sender("。。。") == ""
+        assert processor._normalize_text("...") == ""
+        assert processor._normalize_text("。。。") == ""
+        assert processor._normalize_text("!?~") == ""
+
+    # ==================== Emoji 标准化 ====================
+
+    def test_normalize_emoji_smile(self, processor):
+        """标准化：不同笑脸 emoji"""
+        assert processor._normalize_text("好的😄") == processor._normalize_text("好的😊")
+        assert processor._normalize_text("好的😄") == processor._normalize_text("好的")
+
+    def test_normalize_emoji_thumbs(self, processor):
+        """标准化：点赞 emoji"""
+        assert processor._normalize_text("OK👍") == processor._normalize_text("OK👌")
+        assert processor._normalize_text("OK👍") == processor._normalize_text("OK")
+
+    def test_normalize_emoji_heart(self, processor):
+        """标准化：爱心 emoji（带变体选择符）"""
+        assert processor._normalize_text("收到❤️") == processor._normalize_text("收到")
+        assert processor._normalize_text("收到❤️") == processor._normalize_text("收到💕")
+
+    def test_normalize_emoji_laugh(self, processor):
+        """标准化：笑哭 emoji"""
+        assert processor._normalize_text("哈哈哈😂") == processor._normalize_text("哈哈哈🤣")
+        assert processor._normalize_text("哈哈哈😂😂😂") == processor._normalize_text("哈哈哈")
+
+    def test_normalize_emoji_sun(self, processor):
+        """标准化：太阳 emoji"""
+        assert processor._normalize_text("早上好🌞") == processor._normalize_text("早上好☀️")
+
+    def test_normalize_only_emoji(self, processor):
+        """标准化：只有 emoji"""
+        assert processor._normalize_text("😄😄😄") == ""
+        assert processor._normalize_text("👍🎉❤️") == ""
+
+    def test_normalize_emoji_in_middle(self, processor):
+        """标准化：emoji 在中间"""
+        assert processor._normalize_text("你好😄世界") == processor._normalize_text("你好世界")
+
+    # ==================== 混合场景 ====================
+
+    def test_normalize_punctuation_and_emoji(self, processor):
+        """标准化：同时包含标点和 emoji"""
+        assert processor._normalize_text("你好！😄") == processor._normalize_text("你好")
+        assert processor._normalize_text("OK!👍") == processor._normalize_text("OK")
+
+    def test_normalize_preserves_content(self, processor):
+        """标准化：保留核心内容"""
+        assert processor._normalize_text("你好😄") == "你好"
+        assert processor._normalize_text("Hello World!") == "Hello World"
+        assert processor._normalize_text("测试123") == "测试123"
+
+    def test_normalize_whitespace(self, processor):
+        """标准化：空白字符处理"""
+        assert processor._normalize_text("你好  世界") == "你好 世界"
+        assert processor._normalize_text("  你好  ") == "你好"
 
     def test_messages_equal_same_sender(self, processor):
         """消息相等：相同发送者"""
@@ -508,6 +568,88 @@ class TestSenderNormalization:
         # 应该只有 "新消息" 是新的
         assert len(result) == 1
         assert result[0] == ("王五", "新消息")
+
+    # ==================== Emoji 去重端到端测试 ====================
+
+    def test_dedup_emoji_in_content(self, processor):
+        """去重：消息内容 emoji 不一致"""
+        contact = "测试联系人"
+
+        # 第一次识别：带 emoji
+        processor._local_dedup(contact, [
+            ("张三", "好的😄"),
+            ("李四", "收到👍"),
+        ])
+
+        # 第二次识别：emoji 不一致或缺失
+        result = processor._local_dedup(contact, [
+            ("张三", "好的😊"),  # 😄 变成 😊
+            ("李四", "收到"),    # 👍 丢失
+            ("王五", "新消息"),
+        ])
+
+        # 应该只有 "新消息" 是新的
+        assert len(result) == 1
+        assert result[0] == ("王五", "新消息")
+
+    def test_dedup_emoji_added_by_ai(self, processor):
+        """去重：AI 多识别出 emoji"""
+        contact = "测试联系人"
+
+        # 第一次识别：无 emoji
+        processor._local_dedup(contact, [
+            ("张三", "好的"),
+            ("李四", "收到"),
+        ])
+
+        # 第二次识别：AI 多识别出 emoji
+        result = processor._local_dedup(contact, [
+            ("张三", "好的😄"),  # 多了 😄
+            ("李四", "收到❤️"),  # 多了 ❤️
+            ("王五", "真棒🎉"),
+        ])
+
+        # 应该只有 "真棒🎉" 是新的
+        assert len(result) == 1
+        assert result[0][1] in ("真棒🎉", "真棒")  # 标准化后相等
+
+    def test_dedup_multiple_emoji_variations(self, processor):
+        """去重：多个 emoji 变化"""
+        contact = "测试联系人"
+
+        # 第一次识别
+        processor._local_dedup(contact, [
+            ("用户", "哈哈哈😂😂😂"),
+        ])
+
+        # 第二次识别：emoji 数量或类型不同
+        result = processor._local_dedup(contact, [
+            ("用户", "哈哈哈🤣"),  # 😂😂😂 变成 🤣
+            ("用户", "新消息"),
+        ])
+
+        # 应该只有 "新消息" 是新的
+        assert len(result) == 1
+        assert result[0][1] == "新消息"
+
+    def test_dedup_emoji_with_punctuation(self, processor):
+        """去重：emoji + 标点同时不一致"""
+        contact = "测试联系人"
+
+        # 第一次识别
+        processor._local_dedup(contact, [
+            ("无趣.", "你好!😄"),
+        ])
+
+        # 第二次识别：发送者标点、内容标点、emoji 都不一致
+        result = processor._local_dedup(contact, [
+            ("无趣。", "你好！😊"),  # 全部不一致
+            ("无趣", "新消息"),
+        ])
+
+        # 应该只有 "新消息" 是新的
+        assert len(result) == 1
+        assert result[0][1] == "新消息"
 
 
 class TestEdgeCases:

@@ -106,22 +106,21 @@ class AIMessageProcessor:
         )
 
     def _normalize_text(self, text: str) -> str:
-        """标准化文本，去除所有标点符号用于比较
+        """标准化文本，去除标点符号和 emoji 用于比较
 
-        解决 AI 识别时标点符号不一致的问题，例如：
-        - "无趣." vs "无趣。"
-        - "你好?" vs "你好？"
-        - "hi~" vs "hi～"
+        解决 AI 识别不稳定的问题：
+        - 标点差异: "无趣." vs "无趣。", "你好?" vs "你好？"
+        - emoji 差异: "好的😄" vs "好的😊" vs "好的"
         """
         if not text:
             return ""
-        # 移除所有标点符号（包括中英文标点）
+        # 只保留字母、数字、空格，去除标点、符号、emoji
         result = []
         for char in text:
-            # 保留字母、数字、汉字、空白，去除标点和符号
             category = unicodedata.category(char)
-            # L: Letter, N: Number, M: Mark, Z: Separator (空格等)
-            if category.startswith(('L', 'N', 'M', 'Zs')):
+            # L: Letter (含汉字), N: Number, Zs: Space separator
+            # 不保留 M (Mark) 因为 emoji 变体选择符属于 Mn 类别
+            if category.startswith(('L', 'N', 'Zs')):
                 result.append(char)
         # 压缩连续空白为单个空格
         return ' '.join(''.join(result).split())
