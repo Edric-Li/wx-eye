@@ -105,24 +105,26 @@ class AIMessageProcessor:
             f"model={model if enable_ai else 'N/A'}"
         )
 
-    def _normalize_sender(self, sender: str) -> str:
-        """标准化发送者昵称，去除所有标点符号用于比较
+    def _normalize_text(self, text: str) -> str:
+        """标准化文本，去除所有标点符号用于比较
 
         解决 AI 识别时标点符号不一致的问题，例如：
         - "无趣." vs "无趣。"
-        - "test!" vs "test！"
+        - "你好?" vs "你好？"
+        - "hi~" vs "hi～"
         """
-        if not sender:
+        if not text:
             return ""
         # 移除所有标点符号（包括中英文标点）
         result = []
-        for char in sender:
-            # 保留字母、数字、汉字，去除标点和符号
+        for char in text:
+            # 保留字母、数字、汉字、空白，去除标点和符号
             category = unicodedata.category(char)
-            # L: Letter, N: Number, M: Mark
-            if category.startswith(('L', 'N', 'M')):
+            # L: Letter, N: Number, M: Mark, Z: Separator (空格等)
+            if category.startswith(('L', 'N', 'M', 'Zs')):
                 result.append(char)
-        return ''.join(result)
+        # 压缩连续空白为单个空格
+        return ' '.join(''.join(result).split())
 
     def _messages_equal(
         self,
@@ -131,14 +133,14 @@ class AIMessageProcessor:
     ) -> bool:
         """比较两条消息是否相等
 
-        发送者使用标准化比较（忽略标点符号），
-        消息内容使用精确比较。
+        发送者和消息内容都使用标准化比较（忽略标点符号），
+        解决 AI 识别时标点符号不一致导致去重失败的问题。
         """
         sender1, content1 = msg1
         sender2, content2 = msg2
         return (
-            self._normalize_sender(sender1) == self._normalize_sender(sender2)
-            and content1 == content2
+            self._normalize_text(sender1) == self._normalize_text(sender2)
+            and self._normalize_text(content1) == self._normalize_text(content2)
         )
 
     def set_callback(self, callback: Callable[[ProcessingResult], Any]) -> None:
@@ -176,17 +178,17 @@ class AIMessageProcessor:
     def _is_sent_by_user(self, contact: str, content: str) -> bool:
         """检查消息是否是用户发送的
 
-        使用规范化比较，去除首尾空白并压缩连续空白，
+        使用标准化比较（去除标点符号），
         提高 AI 识别结果与原始发送消息的匹配率。
         """
         if contact not in self._sent_messages:
             return False
 
-        # 规范化：去除首尾空白，压缩连续空白
-        content_normalized = " ".join(content.split())
+        # 标准化：去除标点符号
+        content_normalized = self._normalize_text(content)
 
         for sent_text, _ in self._sent_messages[contact]:
-            sent_normalized = " ".join(sent_text.split())
+            sent_normalized = self._normalize_text(sent_text)
             if sent_normalized == content_normalized:
                 return True
         return False
