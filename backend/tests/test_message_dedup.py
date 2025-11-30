@@ -419,6 +419,97 @@ class TestFindSequence:
         assert processor._find_sequence(messages, sequence) == 0  # 返回第一个
 
 
+class TestSenderNormalization:
+    """发送者昵称标准化测试（忽略标点符号）"""
+
+    @pytest.fixture
+    def processor(self):
+        return AIMessageProcessor(api_key="", enable_ai=False)
+
+    def test_normalize_sender_period(self, processor):
+        """标准化：英文句号 vs 中文句号"""
+        assert processor._normalize_sender("无趣.") == processor._normalize_sender("无趣。")
+
+    def test_normalize_sender_exclamation(self, processor):
+        """标准化：英文感叹号 vs 中文感叹号"""
+        assert processor._normalize_sender("test!") == processor._normalize_sender("test！")
+
+    def test_normalize_sender_mixed(self, processor):
+        """标准化：混合标点"""
+        assert processor._normalize_sender("用户.名!") == processor._normalize_sender("用户。名！")
+
+    def test_normalize_sender_empty(self, processor):
+        """标准化：空字符串"""
+        assert processor._normalize_sender("") == ""
+
+    def test_normalize_sender_only_punctuation(self, processor):
+        """标准化：只有标点符号"""
+        assert processor._normalize_sender("...") == ""
+        assert processor._normalize_sender("。。。") == ""
+
+    def test_messages_equal_same_sender(self, processor):
+        """消息相等：相同发送者"""
+        msg1 = ("无趣.", "你好")
+        msg2 = ("无趣.", "你好")
+        assert processor._messages_equal(msg1, msg2)
+
+    def test_messages_equal_sender_punctuation_diff(self, processor):
+        """消息相等：发送者标点不同"""
+        msg1 = ("无趣.", "你好")
+        msg2 = ("无趣。", "你好")
+        assert processor._messages_equal(msg1, msg2)
+
+    def test_messages_not_equal_content_diff(self, processor):
+        """消息不相等：内容不同"""
+        msg1 = ("无趣.", "你好")
+        msg2 = ("无趣.", "世界")
+        assert not processor._messages_equal(msg1, msg2)
+
+    def test_find_sequence_with_punctuation_diff(self, processor):
+        """序列查找：发送者标点不一致"""
+        # 历史中是英文句号，当前识别成中文句号
+        messages = [("无趣。", "A"), ("无趣。", "B"), ("无趣。", "C")]
+        sequence = [("无趣.", "A"), ("无趣.", "B")]  # 英文句号
+        assert processor._find_sequence(messages, sequence) == 0
+
+    def test_dedup_with_punctuation_diff(self, processor):
+        """去重：发送者标点不一致"""
+        contact = "测试联系人"
+
+        # 第一次识别：英文句号
+        processor._local_dedup(contact, [("无趣.", "消息1"), ("无趣.", "消息2")])
+
+        # 第二次识别：中文句号（AI 识别不一致）
+        result = processor._local_dedup(
+            contact,
+            [("无趣。", "消息1"), ("无趣。", "消息2"), ("无趣。", "消息3")]
+        )
+        # 应该正确识别出新消息，不应该因为标点不一致而把全部消息当作新消息
+        assert len(result) == 1
+        assert result[0][1] == "消息3"
+
+    def test_dedup_mixed_punctuation(self, processor):
+        """去重：混合标点场景"""
+        contact = "测试联系人"
+
+        # 初始消息有多种标点符号的昵称
+        processor._local_dedup(contact, [
+            ("张三.", "你好"),
+            ("李四!", "世界"),
+        ])
+
+        # AI 识别时标点不一致
+        result = processor._local_dedup(contact, [
+            ("张三。", "你好"),  # 句号变中文
+            ("李四！", "世界"),  # 感叹号变中文
+            ("王五", "新消息"),
+        ])
+
+        # 应该只有 "新消息" 是新的
+        assert len(result) == 1
+        assert result[0] == ("王五", "新消息")
+
+
 class TestEdgeCases:
     """边界情况测试"""
 

@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -105,6 +105,42 @@ class AIMessageProcessor:
         logger.info(
             f"AI 处理器初始化: enable_ai={enable_ai}, "
             f"model={model if enable_ai else 'N/A'}"
+        )
+
+    def _normalize_sender(self, sender: str) -> str:
+        """标准化发送者昵称，去除所有标点符号用于比较
+
+        解决 AI 识别时标点符号不一致的问题，例如：
+        - "无趣." vs "无趣。"
+        - "test!" vs "test！"
+        """
+        if not sender:
+            return ""
+        # 移除所有标点符号（包括中英文标点）
+        result = []
+        for char in sender:
+            # 保留字母、数字、汉字，去除标点和符号
+            category = unicodedata.category(char)
+            # L: Letter, N: Number, M: Mark
+            if category.startswith(('L', 'N', 'M')):
+                result.append(char)
+        return ''.join(result)
+
+    def _messages_equal(
+        self,
+        msg1: tuple[str, str],
+        msg2: tuple[str, str],
+    ) -> bool:
+        """比较两条消息是否相等
+
+        发送者使用标准化比较（忽略标点符号），
+        消息内容使用精确比较。
+        """
+        sender1, content1 = msg1
+        sender2, content2 = msg2
+        return (
+            self._normalize_sender(sender1) == self._normalize_sender(sender2)
+            and content1 == content2
         )
 
     def set_callback(self, callback: Callable[[ProcessingResult], Any]) -> None:
@@ -463,6 +499,8 @@ class AIMessageProcessor:
     ) -> int:
         """在消息列表中查找连续序列的起始位置
 
+        使用 _messages_equal 进行比较，发送者昵称忽略标点符号。
+
         Returns:
             匹配的起始位置，未找到返回 -1
         """
@@ -471,7 +509,13 @@ class AIMessageProcessor:
 
         seq_len = len(sequence)
         for i in range(len(messages) - seq_len + 1):
-            if messages[i:i + seq_len] == sequence:
+            # 使用自定义比较方法，忽略发送者昵称中的标点符号差异
+            match = True
+            for j in range(seq_len):
+                if not self._messages_equal(messages[i + j], sequence[j]):
+                    match = False
+                    break
+            if match:
                 return i
 
         return -1
